@@ -1,7 +1,7 @@
 # Bluecoin algorithm development
 
 ******* NOTE *******
-If the screenshots do not render properly, please goto the following URL:  https://github.com/nstrumenta/bluecoin
+If the screenshots do not render properly, please goto the following URL:  https://github.com/nstrumenta/wearables
 
 Go to https://editor.nstrumenta.com in order to access the Nstrumenta Algorithm development and Sandbox platform.  You will see the following Sign In dialog box:
 
