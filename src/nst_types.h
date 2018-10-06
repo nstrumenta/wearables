@@ -42,6 +42,10 @@ typedef struct
 typedef struct
 {
     int sample_count;
+    double delta_time;
+
+    float madgwick_gain;
+    float angularrate_mag;
 
     double gyro_sample_time;
     vec3_t gyro_sample;
@@ -49,12 +53,13 @@ typedef struct
 
     vec3_t acc_sample;
 
-    ekf_t imu;
-    double imu_update_time;
+    // ekf_t imu;
+    // double imu_update_time;
 
-    double imu_meas_noise;
-    double imu_mag_update_interval;
-        
+
+    // double imu_meas_noise;
+    // double imu_mag_update_interval;
+    vec3_t mag_sample;
     vec3_t mag_offset; 
     vec3_t mag_scale;
     vec3_t mag_alignment_hpr;
@@ -69,10 +74,10 @@ typedef struct
     vec3_t acc_alignment_hpr;
 
     pose_t pose_imu;
-    pose_t pose_gyro;
-    pose_t pose_mag;
+    // pose_t pose_gyro;
+    // pose_t pose_mag;
 
-    double previous_rotation_time;
+    // double previous_rotation_time;
 } imu_data_t;
 
 typedef struct {
