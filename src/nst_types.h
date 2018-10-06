@@ -65,15 +65,15 @@ typedef struct
     vec3_t mag_alignment_hpr;
     double mag_declination; 
 
-    vec3_t gyro_offset; 
-    vec3_t gyro_scale; 
-    vec3_t gyro_alignment_hpr;
+    // vec3_t gyro_offset; 
+    // vec3_t gyro_scale; 
+    // vec3_t gyro_alignment_hpr;
 
-    vec3_t acc_offset; 
-    vec3_t acc_scale; 
-    vec3_t acc_alignment_hpr;
+    // vec3_t acc_offset; 
+    // vec3_t acc_scale; 
+    // vec3_t acc_alignment_hpr;
 
-    pose_t pose_imu;
+    // pose_t pose_imu;
     // pose_t pose_gyro;
     // pose_t pose_mag;
 
