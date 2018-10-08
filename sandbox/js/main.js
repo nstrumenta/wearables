@@ -5,28 +5,26 @@ var outputEvents = [];
 var nst_project = {
     "parameters":
         [
-            { "id": "imu_mag_update_interval", "name": "Kalman mag update interval", "value": 1, "min": 0, "max": 60, "step": 0.1 },
-            { "id": "imu_meas_noise", "name": "Kalman measurement noise", "value": 1e-2, "min": 0, "max": 10, "step": 0.001 },
-            { "id": "mag_declination", "name": "Mag Declination", "value": 0, "min": -180, "max": 180, "step": 0.01 },
-            { "id": "mag_offset.x", "name": "mag offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "mag_offset.y", "name": "mag offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "mag_offset.z", "name": "mag offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "mag_scale.x", "name": "mag scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "mag_scale.y", "name": "mag scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "mag_scale.z", "name": "mag scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "mag_alignment_hpr.x", "name": "mag alignment h", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-            { "id": "mag_alignment_hpr.y", "name": "mag alignment p", "value": 0, "min": -90, "max": 90, "step": 1e-5 },
-            { "id": "mag_alignment_hpr.z", "name": "mag alignment r", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-
-            { "id": "gyro_offset.x", "name": "gyro offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "gyro_offset.y", "name": "gyro offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "gyro_offset.z", "name": "gyro offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
-            { "id": "gyro_scale.x", "name": "gyro scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "gyro_scale.y", "name": "gyro scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "gyro_alignment_hpr.x", "name": "gyro alignment h", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-            { "id": "gyro_alignment_hpr.y", "name": "gyro alignment p", "value": 0, "min": -90, "max": 90, "step": 1e-5 },
-            { "id": "gyro_alignment_hpr.z", "name": "gyro alignment r", "value": 0, "min": -180, "max": 180, "step": 1e-5 }
+            { "id": "imu_data.acc_offset.x", "name": "acc offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.acc_offset.y", "name": "acc offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.acc_offset.z", "name": "acc offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.acc_scale.x", "name": "acc scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.acc_scale.y", "name": "acc scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.acc_scale.z", "name": "acc scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.mag_offset.x", "name": "mag offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.mag_offset.y", "name": "mag offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.mag_offset.z", "name": "mag offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.mag_scale.x", "name": "mag scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.mag_scale.y", "name": "mag scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.mag_scale.z", "name": "mag scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.gyro_offset.x", "name": "gyro offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.gyro_offset.y", "name": "gyro offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.gyro_offset.z", "name": "gyro offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
+            { "id": "imu_data.gyro_scale.x", "name": "gyro scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.gyro_scale.y", "name": "gyro scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "imu_data.gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
+            { "id": "madgwick_gain", "name": "accel gain", "value": 0.12, "min": 0, "max": 1, "step": 1e-4 },
+            { "id": "angularrate_mag", "name": "mag gain", "value": -0.001, "min": -1, "max": 1, "step": 1e-5 }
         ]
 }
 
@@ -212,7 +210,7 @@ var labels = {
     7: {
         name: 'Temperature',
         type: 'input',
-        traces: ['Temp(°C)']
+        traces: ['Temp(Â°C)']
     },
     11: {
         name: 'Rotation Vector',
@@ -289,9 +287,9 @@ var labels = {
     },
 
     2000: {
-        name: 'Kalman Quaternion',
+        name: 'Pose',
         type: 'computed',
-        traces: ['x', 'y', 'z', 'w', 'measured x', 'measured y', 'measured z']
+        traces: ['quaternion x', 'quaternion y', 'quaternion z', 'quaternion w', 'position x', 'position y', 'position z']
     },
     2001: {
         name: 'Pitch and Roll',
@@ -1590,15 +1588,19 @@ guiOptimize.add(parameters, 'optimize');
 
 guiParameters = gui.addFolder('parameters');
 guiParametersMag = guiParameters.addFolder('mag');
+guiParametersAcc = guiParameters.addFolder('acc');
 guiParametersGyro = guiParameters.addFolder('gyro');
 for (index in nst_project.parameters) {
     const param = nst_project.parameters[index];
     var folder = guiParameters;
-    if (param.id.startsWith('mag')) {
+    if (param.id.startsWith('imu_data.mag_')) {
         folder = guiParametersMag;
     }
-    if (param.id.startsWith('gyro')) {
+    if (param.id.startsWith('imu_data.gyro_')) {
         folder = guiParametersGyro;
+    }
+    if (param.id.startsWith('imu_data.acc_')) {
+        folder = guiParametersAcc;
     }
     controllers[param.id] = folder.add(parameters, param.id, param.min, param.max).name(param.name).step(param.step).onChange(function () {
         for (var i in nst_project.parameters) {

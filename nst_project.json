@@ -1,27 +1,17 @@
 {
     "parameters":
         [
-            { "id": "imu_data.imu_mag_update_interval", "name": "Kalman mag update interval", "value": 1, "min": 0, "max": 60, "step": 0.1 },
-            { "id": "imu_data.imu_meas_noise", "name": "Kalman measurement noise", "value": 1e-2, "min": 0, "max": 10, "step": 0.001 },
-            { "id": "imu_data.mag_declination", "name": "Mag Declination", "value": 0, "min": -180, "max": 180, "step": 0.01 },
             { "id": "imu_data.mag_offset.x", "name": "mag offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.mag_offset.y", "name": "mag offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.mag_offset.z", "name": "mag offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.mag_scale.x", "name": "mag scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.mag_scale.y", "name": "mag scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.mag_scale.z", "name": "mag scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "imu_data.mag_alignment_hpr.x", "name": "mag alignment h", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-            { "id": "imu_data.mag_alignment_hpr.y", "name": "mag alignment p", "value": 0, "min": -90, "max": 90, "step": 1e-5 },
-            { "id": "imu_data.mag_alignment_hpr.z", "name": "mag alignment r", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-
             { "id": "imu_data.gyro_offset.x", "name": "gyro offset x", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.gyro_offset.y", "name": "gyro offset y", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.gyro_offset.z", "name": "gyro offset z", "value": 0, "min": -1e2, "max": 1e2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.x", "name": "gyro scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.y", "name": "gyro scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "imu_data.gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "imu_data.gyro_alignment_hpr.x", "name": "gyro alignment h", "value": 0, "min": -180, "max": 180, "step": 1e-5 },
-            { "id": "imu_data.gyro_alignment_hpr.y", "name": "gyro alignment p", "value": 0, "min": -90, "max": 90, "step": 1e-5 },
-            { "id": "imu_data.gyro_alignment_hpr.z", "name": "gyro alignment r", "value": 0, "min": -180, "max": 180, "step": 1e-5 }
+            { "id": "imu_data.gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 }
         ]
 }

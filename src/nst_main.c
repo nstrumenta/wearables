@@ -10,3 +10,4 @@ void algorithm_update(const nst_event_t input_event, nst_event_t output_events[4
 {
     imu_update(&nst_data.imu_data,input_event,output_events,output_events_count);
 }
+
