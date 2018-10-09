@@ -38,8 +38,8 @@ Module['quit'] = function(status, toThrow) {
 Module['preRun'] = [];
 Module['postRun'] = [];
 
-// The environment setup code below is customized to use Module.
-// *** Environment setup code ***
+// Determine the runtime environment we are in. You can customize this by
+// setting the ENVIRONMENT setting at compile time (see settings.js).
 
 var ENVIRONMENT_IS_WEB = false;
 var ENVIRONMENT_IS_WORKER = false;
@@ -59,8 +59,23 @@ if (Module['ENVIRONMENT']) {
 // 2) We could be the application main() thread proxied to worker. (with Emscripten -s PROXY_TO_WORKER=1) (ENVIRONMENT_IS_WORKER == true, ENVIRONMENT_IS_PTHREAD == false)
 // 3) We could be an application pthread running in a worker. (ENVIRONMENT_IS_WORKER == true and ENVIRONMENT_IS_PTHREAD == true)
 
-if (ENVIRONMENT_IS_NODE) {
+assert(typeof Module['memoryInitializerPrefixURL'] === 'undefined', 'Module.memoryInitializerPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['pthreadMainPrefixURL'] === 'undefined', 'Module.pthreadMainPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['cdInitializerPrefixURL'] === 'undefined', 'Module.cdInitializerPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['filePackagePrefixURL'] === 'undefined', 'Module.filePackagePrefixURL option was removed, use Module.locateFile instead');
 
+// `/` should be present at the end if `scriptDirectory` is not empty
+var scriptDirectory = '';
+function locateFile(path) {
+  if (Module['locateFile']) {
+    return Module['locateFile'](path, scriptDirectory);
+  } else {
+    return scriptDirectory + path;
+  }
+}
+
+if (ENVIRONMENT_IS_NODE) {
+  scriptDirectory = __dirname + '/';
 
   // Expose functionality in the same simple way that the shells work
   // Note that we pollute the global namespace here, otherwise we break in node
@@ -146,6 +161,22 @@ if (ENVIRONMENT_IS_SHELL) {
   }
 } else
 if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
+  if (ENVIRONMENT_IS_WEB) {
+    if (document.currentScript) {
+      scriptDirectory = document.currentScript.src;
+    }
+  } else { // worker
+    scriptDirectory = self.location.href;
+  }
+  // blob urls look like blob:http://site.com/etc/etc and we cannot infer anything from them.
+  // otherwise, slice off the final part of the url to find the script directory.
+  // if scriptDirectory does not contain a slash, lastIndexOf will return -1,
+  // and scriptDirectory will correctly be replaced with an empty string.
+  if (scriptDirectory.indexOf('blob:') !== 0) {
+    scriptDirectory = scriptDirectory.substr(0, scriptDirectory.lastIndexOf('/')+1);
+  } else {
+    scriptDirectory = '';
+  }
 
 
   Module['read'] = function shell_read(url) {
@@ -194,8 +225,6 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 // bind(console) is necessary to fix IE/Edge closed dev tools panel behavior.
 var out = Module['print'] || (typeof console !== 'undefined' ? console.log.bind(console) : (typeof print !== 'undefined' ? print : null));
 var err = Module['printErr'] || (typeof printErr !== 'undefined' ? printErr : ((typeof console !== 'undefined' && console.warn.bind(console)) || out));
-
-// *** Environment setup code ***
 
 // Merge back in the overrides
 for (key in moduleOverrides) {
@@ -396,7 +425,13 @@ var GLOBAL_BASE = 8;
 // Runtime essentials
 //========================================
 
-var ABORT = 0; // whether we are quitting the application. no code should run after this. set in exit() and abort()
+// whether we are quitting the application. no code should run after this.
+// set in exit() and abort()
+var ABORT = false;
+
+// set by exit() and abort().  Passed to 'onExit' handler.
+// NOTE: This is also used as the process return code code in shell environments
+// but only when noExitRuntime is false.
 var EXITSTATUS = 0;
 
 /** @type {function(*, string=)} */
@@ -682,7 +717,10 @@ function UTF8ArrayToString(u8Array, idx) {
 
     var str = '';
     while (1) {
-      // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description and https://www.ietf.org/rfc/rfc2279.txt and https://tools.ietf.org/html/rfc3629
+      // For UTF8 byte structure, see:
+      // http://en.wikipedia.org/wiki/UTF-8#Description
+      // https://www.ietf.org/rfc/rfc2279.txt
+      // https://tools.ietf.org/html/rfc3629
       u0 = u8Array[idx++];
       if (!u0) return str;
       if (!(u0 & 0x80)) { str += String.fromCharCode(u0); continue; }
@@ -729,8 +767,9 @@ function UTF8ToString(ptr) {
 //   str: the Javascript string to copy.
 //   outU8Array: the array to copy to. Each index in this array is assumed to be one 8-byte element.
 //   outIdx: The starting offset in the array to begin the copying.
-//   maxBytesToWrite: The maximum number of bytes this function can write to the array. This count should include the null
-//                    terminator, i.e. if maxBytesToWrite=1, only the null terminator will be written and nothing else.
+//   maxBytesToWrite: The maximum number of bytes this function can write to the array.
+//                    This count should include the null terminator,
+//                    i.e. if maxBytesToWrite=1, only the null terminator will be written and nothing else.
 //                    maxBytesToWrite=0 does not write any bytes to the output, not even the null terminator.
 // Returns the number of bytes written, EXCLUDING the null terminator.
 
@@ -745,7 +784,10 @@ function stringToUTF8Array(str, outU8Array, outIdx, maxBytesToWrite) {
     // See http://unicode.org/faq/utf_bom.html#utf16-3
     // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description and https://www.ietf.org/rfc/rfc2279.txt and https://tools.ietf.org/html/rfc3629
     var u = str.charCodeAt(i); // possibly a lead surrogate
-    if (u >= 0xD800 && u <= 0xDFFF) u = 0x10000 + ((u & 0x3FF) << 10) | (str.charCodeAt(++i) & 0x3FF);
+    if (u >= 0xD800 && u <= 0xDFFF) {
+      var u1 = str.charCodeAt(++i);
+      u = 0x10000 + ((u & 0x3FF) << 10) | (u1 & 0x3FF);
+    }
     if (u <= 0x7F) {
       if (outIdx >= endIdx) break;
       outU8Array[outIdx++] = u;
@@ -1314,7 +1356,7 @@ var Math_trunc = Math.trunc;
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and
 // decrement it. Incrementing must happen in a place like
-// PRE_RUN_ADDITIONS (used by emcc to add file preloading).
+// Module.preRun (used by emcc to add file preloading).
 // Note that you can add dependencies in preRun, even though
 // it happens right before run - run will be postponed until
 // the dependencies are met.
@@ -1457,11 +1499,11 @@ function _emscripten_asm_const_ii(code, a0) {
 
 STATIC_BASE = GLOBAL_BASE;
 
-STATICTOP = STATIC_BASE + 5872;
+STATICTOP = STATIC_BASE + 4656;
 /* global initializers */  __ATINIT__.push({ func: function() { __GLOBAL__sub_I_nstrumenta_cpp() } }, { func: function() { __GLOBAL__sub_I_bind_cpp() } });
 
 
-/* memory initializer */ allocate([184,2,0,0,103,4,0,0,36,3,0,0,116,4,0,0,0,0,0,0,8,0,0,0,36,3,0,0,130,4,0,0,1,0,0,0,8,0,0,0,184,2,0,0,207,7,0,0,184,2,0,0,238,7,0,0,184,2,0,0,13,8,0,0,184,2,0,0,44,8,0,0,184,2,0,0,75,8,0,0,184,2,0,0,106,8,0,0,184,2,0,0,137,8,0,0,184,2,0,0,168,8,0,0,184,2,0,0,199,8,0,0,184,2,0,0,230,8,0,0,184,2,0,0,5,9,0,0,184,2,0,0,36,9,0,0,184,2,0,0,67,9,0,0,64,3,0,0,86,9,0,0,0,0,0,0,1,0,0,0,176,0,0,0,0,0,0,0,184,2,0,0,149,9,0,0,64,3,0,0,187,9,0,0,0,0,0,0,1,0,0,0,176,0,0,0,0,0,0,0,64,3,0,0,250,9,0,0,0,0,0,0,1,0,0,0,176,0,0,0,0,0,0,0,224,2,0,0,140,10,0,0,248,0,0,0,0,0,0,0,224,2,0,0,57,10,0,0,8,1,0,0,0,0,0,0,184,2,0,0,90,10,0,0,224,2,0,0,103,10,0,0,232,0,0,0,0,0,0,0,224,2,0,0,210,10,0,0,248,0,0,0,0,0,0,0,224,2,0,0,174,10,0,0,32,1,0,0,0,0,0,0,224,2,0,0,244,10,0,0,248,0,0,0,0,0,0,0,8,3,0,0,28,11,0,0,8,3,0,0,30,11,0,0,8,3,0,0,33,11,0,0,8,3,0,0,35,11,0,0,8,3,0,0,37,11,0,0,8,3,0,0,39,11,0,0,8,3,0,0,41,11,0,0,8,3,0,0,43,11,0,0,8,3,0,0,45,11,0,0,8,3,0,0,47,11,0,0,8,3,0,0,49,11,0,0,8,3,0,0,51,11,0,0,8,3,0,0,53,11,0,0,8,3,0,0,55,11,0,0,224,2,0,0,57,11,0,0,232,0,0,0,0,0,0,0,16,0,0,0,80,1,0,0,16,0,0,0,80,1,0,0,16,0,0,0,144,1,0,0,184,1,0,0,144,1,0,0,16,0,0,0,184,1,0,0,152,1,0,0,144,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,184,1,0,0,0,0,0,0,219,15,73,64,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,3,0,0,0,230,18,0,0,0,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,48,2,0,0,0,0,0,0,232,0,0,0,4,0,0,0,5,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,9,0,0,0,10,0,0,0,11,0,0,0,0,0,0,0,16,1,0,0,4,0,0,0,12,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,13,0,0,0,14,0,0,0,15,0,0,0,0,0,0,0,64,1,0,0,4,0,0,0,16,0,0,0,6,0,0,0,7,0,0,0,17,0,0,0,0,0,0,0,48,1,0,0,4,0,0,0,18,0,0,0,6,0,0,0,7,0,0,0,19,0,0,0,0,0,0,0,192,1,0,0,4,0,0,0,20,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,21,0,0,0,22,0,0,0,23,0,0,0,78,115,116,114,117,109,101,110,116,97,0,105,110,105,116,0,115,101,116,80,97,114,97,109,101,116,101,114,0,114,101,112,111,114,116,69,118,101,110,116,0,123,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,32,61,32,123,125,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,116,105,109,101,115,116,97,109,112,32,61,32,36,48,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,105,100,32,61,32,36,49,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,118,97,108,117,101,115,32,61,32,91,93,59,32,125,0,123,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,118,97,108,117,101,115,46,112,117,115,104,40,36,48,41,59,32,125,0,123,32,111,117,116,112,117,116,69,118,101,110,116,77,115,103,40,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,41,59,32,125,0,49,48,78,115,116,114,117,109,101,110,116,97,0,80,49,48,78,115,116,114,117,109,101,110,116,97,0,80,75,49,48,78,115,116,114,117,109,101,110,116,97,0,105,105,0,118,0,118,105,0,118,105,105,0,118,105,105,105,100,0,105,105,105,100,105,105,100,100,100,100,100,100,100,100,0,118,111,105,100,0,98,111,111,108,0,99,104,97,114,0,115,105,103,110,101,100,32,99,104,97,114,0,117,110,115,105,103,110,101,100,32,99,104,97,114,0,115,104,111,114,116,0,117,110,115,105,103,110,101,100,32,115,104,111,114,116,0,105,110,116,0,117,110,115,105,103,110,101,100,32,105,110,116,0,108,111,110,103,0,117,110,115,105,103,110,101,100,32,108,111,110,103,0,102,108,111,97,116,0,100,111,117,98,108,101,0,115,116,100,58,58,115,116,114,105,110,103,0,115,116,100,58,58,98,97,115,105,99,95,115,116,114,105,110,103,60,117,110,115,105,103,110,101,100,32,99,104,97,114,62,0,115,116,100,58,58,119,115,116,114,105,110,103,0,101,109,115,99,114,105,112,116,101,110,58,58,118,97,108,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,115,105,103,110,101,100,32,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,115,104,111,114,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,115,104,111,114,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,105,110,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,108,111,110,103,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,108,111,110,103,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,56,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,56,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,49,54,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,49,54,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,51,50,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,51,50,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,102,108,111,97,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,100,111,117,98,108,101,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,108,111,110,103,32,100,111,117,98,108,101,62,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,101,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,100,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,102,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,109,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,108,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,106,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,105,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,116,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,115,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,104,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,97,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,99,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,51,118,97,108,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,119,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,119,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,119,69,69,69,69,0,78,83,116,51,95,95,50,50,49,95,95,98,97,115,105,99,95,115,116,114,105,110,103,95,99,111,109,109,111,110,73,76,98,49,69,69,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,104,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,104,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,104,69,69,69,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,99,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,99,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,99,69,69,69,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,54,95,95,115,104,105,109,95,116,121,112,101,95,105,110,102,111,69,0,83,116,57,116,121,112,101,95,105,110,102,111,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,48,95,95,115,105,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,55,95,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,57,95,95,112,111,105,110,116,101,114,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,55,95,95,112,98,97,115,101,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,51,95,95,102,117,110,100,97,109,101,110,116,97,108,95,116,121,112,101,95,105,110,102,111,69,0,118,0,68,110,0,98,0,99,0,104,0,97,0,115,0,116,0,105,0,106,0,108,0,109,0,102,0,100,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,49,95,95,118,109,105,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0], "i8", ALLOC_NONE, GLOBAL_BASE);
+/* memory initializer */ allocate([0,0,0,0,0,0,0,0,184,1,0,0,120,0,0,0,248,1,0,0,32,2,0,0,248,1,0,0,120,0,0,0,32,2,0,0,0,2,0,0,248,1,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,32,2,0,0,0,0,0,0,0,0,0,0,105,105,105,100,105,105,100,100,100,100,100,100,100,100,100,0,204,2,0,0,123,4,0,0,56,3,0,0,136,4,0,0,0,0,0,0,112,0,0,0,56,3,0,0,150,4,0,0,1,0,0,0,112,0,0,0,204,2,0,0,212,7,0,0,204,2,0,0,243,7,0,0,204,2,0,0,18,8,0,0,204,2,0,0,49,8,0,0,204,2,0,0,80,8,0,0,204,2,0,0,111,8,0,0,204,2,0,0,142,8,0,0,204,2,0,0,173,8,0,0,204,2,0,0,204,8,0,0,204,2,0,0,235,8,0,0,204,2,0,0,10,9,0,0,204,2,0,0,41,9,0,0,204,2,0,0,72,9,0,0,84,3,0,0,91,9,0,0,0,0,0,0,1,0,0,0,24,1,0,0,0,0,0,0,204,2,0,0,154,9,0,0,84,3,0,0,192,9,0,0,0,0,0,0,1,0,0,0,24,1,0,0,0,0,0,0,84,3,0,0,255,9,0,0,0,0,0,0,1,0,0,0,24,1,0,0,0,0,0,0,244,2,0,0,145,10,0,0,96,1,0,0,0,0,0,0,244,2,0,0,62,10,0,0,112,1,0,0,0,0,0,0,204,2,0,0,95,10,0,0,244,2,0,0,108,10,0,0,80,1,0,0,0,0,0,0,244,2,0,0,215,10,0,0,96,1,0,0,0,0,0,0,244,2,0,0,179,10,0,0,136,1,0,0,0,0,0,0,244,2,0,0,249,10,0,0,96,1,0,0,0,0,0,0,28,3,0,0,33,11,0,0,28,3,0,0,35,11,0,0,28,3,0,0,38,11,0,0,28,3,0,0,40,11,0,0,28,3,0,0,42,11,0,0,28,3,0,0,44,11,0,0,28,3,0,0,46,11,0,0,28,3,0,0,48,11,0,0,28,3,0,0,50,11,0,0,28,3,0,0,52,11,0,0,28,3,0,0,54,11,0,0,28,3,0,0,56,11,0,0,28,3,0,0,58,11,0,0,28,3,0,0,60,11,0,0,244,2,0,0,62,11,0,0,80,1,0,0,0,0,0,0,120,0,0,0,184,1,0,0,120,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,3,0,0,0,120,11,0,0,0,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,68,2,0,0,0,0,0,0,80,1,0,0,4,0,0,0,5,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,9,0,0,0,10,0,0,0,11,0,0,0,0,0,0,0,120,1,0,0,4,0,0,0,12,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,13,0,0,0,14,0,0,0,15,0,0,0,0,0,0,0,168,1,0,0,4,0,0,0,16,0,0,0,6,0,0,0,7,0,0,0,17,0,0,0,0,0,0,0,152,1,0,0,4,0,0,0,18,0,0,0,6,0,0,0,7,0,0,0,19,0,0,0,0,0,0,0,40,2,0,0,4,0,0,0,20,0,0,0,6,0,0,0,7,0,0,0,8,0,0,0,21,0,0,0,22,0,0,0,23,0,0,0,78,115,116,114,117,109,101,110,116,97,0,105,110,105,116,0,115,101,116,80,97,114,97,109,101,116,101,114,0,114,101,112,111,114,116,69,118,101,110,116,0,123,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,32,61,32,123,125,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,116,105,109,101,115,116,97,109,112,32,61,32,36,48,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,105,100,32,61,32,36,49,59,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,118,97,108,117,101,115,32,61,32,91,93,59,32,125,0,123,32,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,46,118,97,108,117,101,115,46,112,117,115,104,40,36,48,41,59,32,125,0,123,32,111,117,116,112,117,116,69,118,101,110,116,77,115,103,40,77,111,100,117,108,101,46,97,108,103,111,114,105,116,104,109,69,118,101,110,116,41,59,32,125,0,49,48,78,115,116,114,117,109,101,110,116,97,0,80,49,48,78,115,116,114,117,109,101,110,116,97,0,80,75,49,48,78,115,116,114,117,109,101,110,116,97,0,105,105,0,118,0,118,105,0,118,105,105,0,118,105,105,105,100,0,118,111,105,100,0,98,111,111,108,0,99,104,97,114,0,115,105,103,110,101,100,32,99,104,97,114,0,117,110,115,105,103,110,101,100,32,99,104,97,114,0,115,104,111,114,116,0,117,110,115,105,103,110,101,100,32,115,104,111,114,116,0,105,110,116,0,117,110,115,105,103,110,101,100,32,105,110,116,0,108,111,110,103,0,117,110,115,105,103,110,101,100,32,108,111,110,103,0,102,108,111,97,116,0,100,111,117,98,108,101,0,115,116,100,58,58,115,116,114,105,110,103,0,115,116,100,58,58,98,97,115,105,99,95,115,116,114,105,110,103,60,117,110,115,105,103,110,101,100,32,99,104,97,114,62,0,115,116,100,58,58,119,115,116,114,105,110,103,0,101,109,115,99,114,105,112,116,101,110,58,58,118,97,108,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,115,105,103,110,101,100,32,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,99,104,97,114,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,115,104,111,114,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,115,104,111,114,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,105,110,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,108,111,110,103,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,110,115,105,103,110,101,100,32,108,111,110,103,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,56,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,56,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,49,54,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,49,54,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,105,110,116,51,50,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,117,105,110,116,51,50,95,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,102,108,111,97,116,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,100,111,117,98,108,101,62,0,101,109,115,99,114,105,112,116,101,110,58,58,109,101,109,111,114,121,95,118,105,101,119,60,108,111,110,103,32,100,111,117,98,108,101,62,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,101,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,100,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,102,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,109,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,108,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,106,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,105,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,116,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,115,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,104,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,97,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,49,49,109,101,109,111,114,121,95,118,105,101,119,73,99,69,69,0,78,49,48,101,109,115,99,114,105,112,116,101,110,51,118,97,108,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,119,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,119,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,119,69,69,69,69,0,78,83,116,51,95,95,50,50,49,95,95,98,97,115,105,99,95,115,116,114,105,110,103,95,99,111,109,109,111,110,73,76,98,49,69,69,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,104,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,104,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,104,69,69,69,69,0,78,83,116,51,95,95,50,49,50,98,97,115,105,99,95,115,116,114,105,110,103,73,99,78,83,95,49,49,99,104,97,114,95,116,114,97,105,116,115,73,99,69,69,78,83,95,57,97,108,108,111,99,97,116,111,114,73,99,69,69,69,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,54,95,95,115,104,105,109,95,116,121,112,101,95,105,110,102,111,69,0,83,116,57,116,121,112,101,95,105,110,102,111,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,48,95,95,115,105,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,55,95,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,57,95,95,112,111,105,110,116,101,114,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,49,55,95,95,112,98,97,115,101,95,116,121,112,101,95,105,110,102,111,69,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,51,95,95,102,117,110,100,97,109,101,110,116,97,108,95,116,121,112,101,95,105,110,102,111,69,0,118,0,68,110,0,98,0,99,0,104,0,97,0,115,0,116,0,105,0,106,0,108,0,109,0,102,0,100,0,78,49,48,95,95,99,120,120,97,98,105,118,49,50,49,95,95,118,109,105,95,99,108,97,115,115,95,116,121,112,101,95,105,110,102,111,69,0], "i8", ALLOC_NONE, GLOBAL_BASE);
 
 
 
@@ -3090,53 +3132,99 @@ function copyTempDouble(ptr) {
 
   function __embind_register_std_string(rawType, name) {
       name = readLatin1String(name);
+      var stdStringIsUTF8
+      //process only std::string bindings with UTF8 support, in contrast to e.g. std::basic_string<unsigned char>
+      = (name === "std::string");
+  
       registerType(rawType, {
           name: name,
           'fromWireType': function(value) {
               var length = HEAPU32[value >> 2];
-              var a = new Array(length);
-              for (var i = 0; i < length; ++i) {
-                  a[i] = String.fromCharCode(HEAPU8[value + 4 + i]);
+  
+              var str;
+              if(stdStringIsUTF8) {
+                  //ensure null termination at one-past-end byte if not present yet
+                  var endChar = HEAPU8[value + 4 + length];
+                  var endCharSwap = 0;
+                  if(endChar != 0)
+                  {
+                    endCharSwap = endChar;
+                    HEAPU8[value + 4 + length] = 0;
+                  }
+  
+                  var decodeStartPtr = value + 4;
+                  //looping here to support possible embedded '0' bytes
+                  for (var i = 0; i <= length; ++i) {
+                    var currentBytePtr = value + 4 + i;
+                    if(HEAPU8[currentBytePtr] == 0)
+                    {
+                      var stringSegment = UTF8ToString(decodeStartPtr);
+                      if(str === undefined)
+                        str = stringSegment;
+                      else
+                      {
+                        str += String.fromCharCode(0);
+                        str += stringSegment;
+                      }
+                      decodeStartPtr = currentBytePtr + 1;
+                    }
+                  }
+  
+                  if(endCharSwap != 0)
+                    HEAPU8[value + 4 + length] = endCharSwap;
+              } else {
+                  var a = new Array(length);
+                  for (var i = 0; i < length; ++i) {
+                      a[i] = String.fromCharCode(HEAPU8[value + 4 + i]);
+                  }
+                  str = a.join('');
               }
+  
               _free(value);
-              return a.join('');
+              
+              return str;
           },
           'toWireType': function(destructors, value) {
               if (value instanceof ArrayBuffer) {
                   value = new Uint8Array(value);
               }
+              
+              var getLength;
+              var valueIsOfTypeString = (typeof value === 'string');
   
-              function getTAElement(ta, index) {
-                  return ta[index];
-              }
-              function getStringElement(string, index) {
-                  return string.charCodeAt(index);
-              }
-              var getElement;
-              if (value instanceof Uint8Array) {
-                  getElement = getTAElement;
-              } else if (value instanceof Uint8ClampedArray) {
-                  getElement = getTAElement;
-              } else if (value instanceof Int8Array) {
-                  getElement = getTAElement;
-              } else if (typeof value === 'string') {
-                  getElement = getStringElement;
-              } else {
+              if (!(valueIsOfTypeString || value instanceof Uint8Array || value instanceof Uint8ClampedArray || value instanceof Int8Array)) {
                   throwBindingError('Cannot pass non-string to std::string');
               }
-  
-              // assumes 4-byte alignment
-              var length = value.length;
-              var ptr = _malloc(4 + length);
-              HEAPU32[ptr >> 2] = length;
-              for (var i = 0; i < length; ++i) {
-                  var charCode = getElement(value, i);
-                  if (charCode > 255) {
-                      _free(ptr);
-                      throwBindingError('String has UTF-16 code units that do not fit in 8 bits');
-                  }
-                  HEAPU8[ptr + 4 + i] = charCode;
+              if (stdStringIsUTF8 && valueIsOfTypeString) {
+                  getLength = function() {return lengthBytesUTF8(value);};
+              } else {
+                  getLength = function() {return value.length;};
               }
+              
+              // assumes 4-byte alignment
+              var length = getLength();
+              var ptr = _malloc(4 + length + 1);
+              HEAPU32[ptr >> 2] = length;
+  
+              if (stdStringIsUTF8 && valueIsOfTypeString) {
+                  stringToUTF8(value, ptr + 4, length + 1);
+              } else {
+                  if(valueIsOfTypeString) {
+                      for (var i = 0; i < length; ++i) {
+                          var charCode = value.charCodeAt(i);
+                          if (charCode > 255) {
+                              _free(ptr);
+                              throwBindingError('String has UTF-16 code units that do not fit in 8 bits');
+                          }
+                          HEAPU8[ptr + 4 + i] = charCode;
+                      }
+                  } else {
+                      for (var i = 0; i < length; ++i) {
+                          HEAPU8[ptr + 4 + i] = value[i];
+                      }
+                  }
+              }
+  
               if (destructors !== null) {
                   destructors.push(_free, ptr);
               }
@@ -3215,16 +3303,6 @@ function copyTempDouble(ptr) {
 
   var _emscripten_asm_const_int=true;
 
-  var _llvm_cos_f64=Math_cos;
-
-  var _llvm_fabs_f64=Math_abs;
-
-  var _llvm_log_f64=Math_log;
-
-  var _llvm_sin_f64=Math_sin;
-
-  var _llvm_sqrt_f32=Math_sqrt;
-
   var _llvm_sqrt_f64=Math_sqrt;
 
   
@@ -3295,9 +3373,9 @@ function nullFunc_i(x) { err("Invalid function pointer called with signature 'i'
 
 function nullFunc_ii(x) { err("Invalid function pointer called with signature 'ii'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
 
-function nullFunc_iidiidddddddd(x) { err("Invalid function pointer called with signature 'iidiidddddddd'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
+function nullFunc_iidiiddddddddd(x) { err("Invalid function pointer called with signature 'iidiiddddddddd'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
 
-function nullFunc_iiidiidddddddd(x) { err("Invalid function pointer called with signature 'iiidiidddddddd'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
+function nullFunc_iiidiiddddddddd(x) { err("Invalid function pointer called with signature 'iiidiiddddddddd'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
 
 function nullFunc_iiii(x) { err("Invalid function pointer called with signature 'iiii'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)");  err("Build with ASSERTIONS=2 for more info.");abort(x) }
 
@@ -3339,10 +3417,10 @@ function invoke_ii(index,a1) {
   }
 }
 
-function invoke_iidiidddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12) {
+function invoke_iidiiddddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13) {
   var sp = stackSave();
   try {
-    return Module["dynCall_iidiidddddddd"](index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12);
+    return Module["dynCall_iidiiddddddddd"](index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13);
   } catch(e) {
     stackRestore(sp);
     if (typeof e !== 'number' && e !== 'longjmp') throw e;
@@ -3350,10 +3428,10 @@ function invoke_iidiidddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12) {
   }
 }
 
-function invoke_iiidiidddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13) {
+function invoke_iiidiiddddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14) {
   var sp = stackSave();
   try {
-    return Module["dynCall_iiidiidddddddd"](index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13);
+    return Module["dynCall_iiidiiddddddddd"](index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14);
   } catch(e) {
     stackRestore(sp);
     if (typeof e !== 'number' && e !== 'longjmp') throw e;
@@ -3462,7 +3540,7 @@ function invoke_viiiiii(index,a1,a2,a3,a4,a5,a6) {
 
 Module.asmGlobalArg = { "Math": Math, "Int8Array": Int8Array, "Int16Array": Int16Array, "Int32Array": Int32Array, "Uint8Array": Uint8Array, "Uint16Array": Uint16Array, "Uint32Array": Uint32Array, "Float32Array": Float32Array, "Float64Array": Float64Array, "NaN": NaN, "Infinity": Infinity };
 
-Module.asmLibraryArg = { "abort": abort, "assert": assert, "enlargeMemory": enlargeMemory, "getTotalMemory": getTotalMemory, "abortOnCannotGrowMemory": abortOnCannotGrowMemory, "abortStackOverflow": abortStackOverflow, "nullFunc_i": nullFunc_i, "nullFunc_ii": nullFunc_ii, "nullFunc_iidiidddddddd": nullFunc_iidiidddddddd, "nullFunc_iiidiidddddddd": nullFunc_iiidiidddddddd, "nullFunc_iiii": nullFunc_iiii, "nullFunc_v": nullFunc_v, "nullFunc_vi": nullFunc_vi, "nullFunc_vii": nullFunc_vii, "nullFunc_viid": nullFunc_viid, "nullFunc_viiid": nullFunc_viiid, "nullFunc_viiii": nullFunc_viiii, "nullFunc_viiiii": nullFunc_viiiii, "nullFunc_viiiiii": nullFunc_viiiiii, "invoke_i": invoke_i, "invoke_ii": invoke_ii, "invoke_iidiidddddddd": invoke_iidiidddddddd, "invoke_iiidiidddddddd": invoke_iiidiidddddddd, "invoke_iiii": invoke_iiii, "invoke_v": invoke_v, "invoke_vi": invoke_vi, "invoke_vii": invoke_vii, "invoke_viid": invoke_viid, "invoke_viiid": invoke_viiid, "invoke_viiii": invoke_viiii, "invoke_viiiii": invoke_viiiii, "invoke_viiiiii": invoke_viiiiii, "ClassHandle": ClassHandle, "ClassHandle_clone": ClassHandle_clone, "ClassHandle_delete": ClassHandle_delete, "ClassHandle_deleteLater": ClassHandle_deleteLater, "ClassHandle_isAliasOf": ClassHandle_isAliasOf, "ClassHandle_isDeleted": ClassHandle_isDeleted, "RegisteredClass": RegisteredClass, "RegisteredPointer": RegisteredPointer, "RegisteredPointer_deleteObject": RegisteredPointer_deleteObject, "RegisteredPointer_destructor": RegisteredPointer_destructor, "RegisteredPointer_fromWireType": RegisteredPointer_fromWireType, "RegisteredPointer_getPointee": RegisteredPointer_getPointee, "__ZSt18uncaught_exceptionv": __ZSt18uncaught_exceptionv, "___cxa_find_matching_catch": ___cxa_find_matching_catch, "___gxx_personality_v0": ___gxx_personality_v0, "___lock": ___lock, "___resumeException": ___resumeException, "___setErrNo": ___setErrNo, "___syscall140": ___syscall140, "___syscall146": ___syscall146, "___syscall54": ___syscall54, "___syscall6": ___syscall6, "___unlock": ___unlock, "__embind_register_bool": __embind_register_bool, "__embind_register_class": __embind_register_class, "__embind_register_class_constructor": __embind_register_class_constructor, "__embind_register_class_function": __embind_register_class_function, "__embind_register_emval": __embind_register_emval, "__embind_register_float": __embind_register_float, "__embind_register_integer": __embind_register_integer, "__embind_register_memory_view": __embind_register_memory_view, "__embind_register_std_string": __embind_register_std_string, "__embind_register_std_wstring": __embind_register_std_wstring, "__embind_register_void": __embind_register_void, "__emval_decref": __emval_decref, "__emval_register": __emval_register, "_abort": _abort, "_embind_repr": _embind_repr, "_emscripten_asm_const_id": _emscripten_asm_const_id, "_emscripten_asm_const_idi": _emscripten_asm_const_idi, "_emscripten_asm_const_ii": _emscripten_asm_const_ii, "_emscripten_memcpy_big": _emscripten_memcpy_big, "_llvm_cos_f64": _llvm_cos_f64, "_llvm_fabs_f64": _llvm_fabs_f64, "_llvm_log_f64": _llvm_log_f64, "_llvm_sin_f64": _llvm_sin_f64, "_llvm_sqrt_f32": _llvm_sqrt_f32, "_llvm_sqrt_f64": _llvm_sqrt_f64, "constNoSmartPtrRawPointerToWireType": constNoSmartPtrRawPointerToWireType, "count_emval_handles": count_emval_handles, "craftInvokerFunction": craftInvokerFunction, "createNamedFunction": createNamedFunction, "downcastPointer": downcastPointer, "embind__requireFunction": embind__requireFunction, "embind_init_charCodes": embind_init_charCodes, "ensureOverloadTable": ensureOverloadTable, "exposePublicSymbol": exposePublicSymbol, "extendError": extendError, "floatReadValueFromPointer": floatReadValueFromPointer, "flushPendingDeletes": flushPendingDeletes, "flush_NO_FILESYSTEM": flush_NO_FILESYSTEM, "genericPointerToWireType": genericPointerToWireType, "getBasestPointer": getBasestPointer, "getInheritedInstance": getInheritedInstance, "getInheritedInstanceCount": getInheritedInstanceCount, "getLiveInheritedInstances": getLiveInheritedInstances, "getShiftFromSize": getShiftFromSize, "getTypeName": getTypeName, "get_first_emval": get_first_emval, "heap32VectorToArray": heap32VectorToArray, "init_ClassHandle": init_ClassHandle, "init_RegisteredPointer": init_RegisteredPointer, "init_embind": init_embind, "init_emval": init_emval, "integerReadValueFromPointer": integerReadValueFromPointer, "makeClassHandle": makeClassHandle, "makeLegalFunctionName": makeLegalFunctionName, "new_": new_, "nonConstNoSmartPtrRawPointerToWireType": nonConstNoSmartPtrRawPointerToWireType, "readLatin1String": readLatin1String, "registerType": registerType, "replacePublicSymbol": replacePublicSymbol, "runDestructor": runDestructor, "runDestructors": runDestructors, "setDelayFunction": setDelayFunction, "shallowCopyInternalPointer": shallowCopyInternalPointer, "simpleReadValueFromPointer": simpleReadValueFromPointer, "throwBindingError": throwBindingError, "throwInstanceAlreadyDeleted": throwInstanceAlreadyDeleted, "throwInternalError": throwInternalError, "throwUnboundTypeError": throwUnboundTypeError, "upcastPointer": upcastPointer, "whenDependentTypesAreResolved": whenDependentTypesAreResolved, "DYNAMICTOP_PTR": DYNAMICTOP_PTR, "tempDoublePtr": tempDoublePtr, "ABORT": ABORT, "STACKTOP": STACKTOP, "STACK_MAX": STACK_MAX };
+Module.asmLibraryArg = { "abort": abort, "assert": assert, "enlargeMemory": enlargeMemory, "getTotalMemory": getTotalMemory, "abortOnCannotGrowMemory": abortOnCannotGrowMemory, "abortStackOverflow": abortStackOverflow, "nullFunc_i": nullFunc_i, "nullFunc_ii": nullFunc_ii, "nullFunc_iidiiddddddddd": nullFunc_iidiiddddddddd, "nullFunc_iiidiiddddddddd": nullFunc_iiidiiddddddddd, "nullFunc_iiii": nullFunc_iiii, "nullFunc_v": nullFunc_v, "nullFunc_vi": nullFunc_vi, "nullFunc_vii": nullFunc_vii, "nullFunc_viid": nullFunc_viid, "nullFunc_viiid": nullFunc_viiid, "nullFunc_viiii": nullFunc_viiii, "nullFunc_viiiii": nullFunc_viiiii, "nullFunc_viiiiii": nullFunc_viiiiii, "invoke_i": invoke_i, "invoke_ii": invoke_ii, "invoke_iidiiddddddddd": invoke_iidiiddddddddd, "invoke_iiidiiddddddddd": invoke_iiidiiddddddddd, "invoke_iiii": invoke_iiii, "invoke_v": invoke_v, "invoke_vi": invoke_vi, "invoke_vii": invoke_vii, "invoke_viid": invoke_viid, "invoke_viiid": invoke_viiid, "invoke_viiii": invoke_viiii, "invoke_viiiii": invoke_viiiii, "invoke_viiiiii": invoke_viiiiii, "ClassHandle": ClassHandle, "ClassHandle_clone": ClassHandle_clone, "ClassHandle_delete": ClassHandle_delete, "ClassHandle_deleteLater": ClassHandle_deleteLater, "ClassHandle_isAliasOf": ClassHandle_isAliasOf, "ClassHandle_isDeleted": ClassHandle_isDeleted, "RegisteredClass": RegisteredClass, "RegisteredPointer": RegisteredPointer, "RegisteredPointer_deleteObject": RegisteredPointer_deleteObject, "RegisteredPointer_destructor": RegisteredPointer_destructor, "RegisteredPointer_fromWireType": RegisteredPointer_fromWireType, "RegisteredPointer_getPointee": RegisteredPointer_getPointee, "__ZSt18uncaught_exceptionv": __ZSt18uncaught_exceptionv, "___cxa_find_matching_catch": ___cxa_find_matching_catch, "___gxx_personality_v0": ___gxx_personality_v0, "___lock": ___lock, "___resumeException": ___resumeException, "___setErrNo": ___setErrNo, "___syscall140": ___syscall140, "___syscall146": ___syscall146, "___syscall54": ___syscall54, "___syscall6": ___syscall6, "___unlock": ___unlock, "__embind_register_bool": __embind_register_bool, "__embind_register_class": __embind_register_class, "__embind_register_class_constructor": __embind_register_class_constructor, "__embind_register_class_function": __embind_register_class_function, "__embind_register_emval": __embind_register_emval, "__embind_register_float": __embind_register_float, "__embind_register_integer": __embind_register_integer, "__embind_register_memory_view": __embind_register_memory_view, "__embind_register_std_string": __embind_register_std_string, "__embind_register_std_wstring": __embind_register_std_wstring, "__embind_register_void": __embind_register_void, "__emval_decref": __emval_decref, "__emval_register": __emval_register, "_abort": _abort, "_embind_repr": _embind_repr, "_emscripten_asm_const_id": _emscripten_asm_const_id, "_emscripten_asm_const_idi": _emscripten_asm_const_idi, "_emscripten_asm_const_ii": _emscripten_asm_const_ii, "_emscripten_memcpy_big": _emscripten_memcpy_big, "_llvm_sqrt_f64": _llvm_sqrt_f64, "constNoSmartPtrRawPointerToWireType": constNoSmartPtrRawPointerToWireType, "count_emval_handles": count_emval_handles, "craftInvokerFunction": craftInvokerFunction, "createNamedFunction": createNamedFunction, "downcastPointer": downcastPointer, "embind__requireFunction": embind__requireFunction, "embind_init_charCodes": embind_init_charCodes, "ensureOverloadTable": ensureOverloadTable, "exposePublicSymbol": exposePublicSymbol, "extendError": extendError, "floatReadValueFromPointer": floatReadValueFromPointer, "flushPendingDeletes": flushPendingDeletes, "flush_NO_FILESYSTEM": flush_NO_FILESYSTEM, "genericPointerToWireType": genericPointerToWireType, "getBasestPointer": getBasestPointer, "getInheritedInstance": getInheritedInstance, "getInheritedInstanceCount": getInheritedInstanceCount, "getLiveInheritedInstances": getLiveInheritedInstances, "getShiftFromSize": getShiftFromSize, "getTypeName": getTypeName, "get_first_emval": get_first_emval, "heap32VectorToArray": heap32VectorToArray, "init_ClassHandle": init_ClassHandle, "init_RegisteredPointer": init_RegisteredPointer, "init_embind": init_embind, "init_emval": init_emval, "integerReadValueFromPointer": integerReadValueFromPointer, "makeClassHandle": makeClassHandle, "makeLegalFunctionName": makeLegalFunctionName, "new_": new_, "nonConstNoSmartPtrRawPointerToWireType": nonConstNoSmartPtrRawPointerToWireType, "readLatin1String": readLatin1String, "registerType": registerType, "replacePublicSymbol": replacePublicSymbol, "runDestructor": runDestructor, "runDestructors": runDestructors, "setDelayFunction": setDelayFunction, "shallowCopyInternalPointer": shallowCopyInternalPointer, "simpleReadValueFromPointer": simpleReadValueFromPointer, "throwBindingError": throwBindingError, "throwInstanceAlreadyDeleted": throwInstanceAlreadyDeleted, "throwInternalError": throwInternalError, "throwUnboundTypeError": throwUnboundTypeError, "upcastPointer": upcastPointer, "whenDependentTypesAreResolved": whenDependentTypesAreResolved, "DYNAMICTOP_PTR": DYNAMICTOP_PTR, "tempDoublePtr": tempDoublePtr, "STACKTOP": STACKTOP, "STACK_MAX": STACK_MAX };
 // EMSCRIPTEN_START_ASM
 var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {
 'almost asm';
@@ -3479,7 +3557,6 @@ var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {
 
   var DYNAMICTOP_PTR=env.DYNAMICTOP_PTR|0;
   var tempDoublePtr=env.tempDoublePtr|0;
-  var ABORT=env.ABORT|0;
   var STACKTOP=env.STACKTOP|0;
   var STACK_MAX=env.STACK_MAX|0;
 
@@ -3517,8 +3594,8 @@ var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {
   var abortStackOverflow=env.abortStackOverflow;
   var nullFunc_i=env.nullFunc_i;
   var nullFunc_ii=env.nullFunc_ii;
-  var nullFunc_iidiidddddddd=env.nullFunc_iidiidddddddd;
-  var nullFunc_iiidiidddddddd=env.nullFunc_iiidiidddddddd;
+  var nullFunc_iidiiddddddddd=env.nullFunc_iidiiddddddddd;
+  var nullFunc_iiidiiddddddddd=env.nullFunc_iiidiiddddddddd;
   var nullFunc_iiii=env.nullFunc_iiii;
   var nullFunc_v=env.nullFunc_v;
   var nullFunc_vi=env.nullFunc_vi;
@@ -3530,8 +3607,8 @@ var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {
   var nullFunc_viiiiii=env.nullFunc_viiiiii;
   var invoke_i=env.invoke_i;
   var invoke_ii=env.invoke_ii;
-  var invoke_iidiidddddddd=env.invoke_iidiidddddddd;
-  var invoke_iiidiidddddddd=env.invoke_iiidiidddddddd;
+  var invoke_iidiiddddddddd=env.invoke_iidiiddddddddd;
+  var invoke_iiidiiddddddddd=env.invoke_iiidiiddddddddd;
   var invoke_iiii=env.invoke_iiii;
   var invoke_v=env.invoke_v;
   var invoke_vi=env.invoke_vi;
@@ -3583,11 +3660,6 @@ var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {
   var _emscripten_asm_const_idi=env._emscripten_asm_const_idi;
   var _emscripten_asm_const_ii=env._emscripten_asm_const_ii;
   var _emscripten_memcpy_big=env._emscripten_memcpy_big;
-  var _llvm_cos_f64=env._llvm_cos_f64;
-  var _llvm_fabs_f64=env._llvm_fabs_f64;
-  var _llvm_log_f64=env._llvm_log_f64;
-  var _llvm_sin_f64=env._llvm_sin_f64;
-  var _llvm_sqrt_f32=env._llvm_sqrt_f32;
   var _llvm_sqrt_f64=env._llvm_sqrt_f64;
   var constNoSmartPtrRawPointerToWireType=env.constNoSmartPtrRawPointerToWireType;
   var count_emval_handles=env.count_emval_handles;
@@ -3682,8 +3754,8 @@ function getTempRet0() {
 function ___cxx_global_var_init() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev(4828); //@line 195 "nstrumenta.cpp"
- return; //@line 195 "nstrumenta.cpp"
+ __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev(4652); //@line 192 "nstrumenta.cpp"
+ return; //@line 192 "nstrumenta.cpp"
 }
 function __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev($0) {
  $0 = $0|0;
@@ -3711,7 +3783,7 @@ function __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev($0) {
  $42 = sp + 24|0;
  $38 = $0;
  $32 = $39;
- $33 = 864;
+ $33 = 884;
  __ZN10emscripten8internal11NoBaseClass6verifyI10NstrumentaEEvv(); //@line 1121 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $34 = 24; //@line 1123 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $43 = (__ZN10emscripten8internal11NoBaseClass11getUpcasterI10NstrumentaEEPFvvEv()|0); //@line 1124 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
@@ -3756,15 +3828,15 @@ function __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev($0) {
  $69 = $26; //@line 1193 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $70 = $24; //@line 1194 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  __embind_register_class_constructor(($64|0),($65|0),($66|0),($68|0),($69|0),($70|0)); //@line 1188 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- HEAP32[$40>>2] = (28); //@line 199 "nstrumenta.cpp"
- $$index1 = ((($40)) + 4|0); //@line 199 "nstrumenta.cpp"
- HEAP32[$$index1>>2] = 0; //@line 199 "nstrumenta.cpp"
+ HEAP32[$40>>2] = (28); //@line 196 "nstrumenta.cpp"
+ $$index1 = ((($40)) + 4|0); //@line 196 "nstrumenta.cpp"
+ HEAP32[$$index1>>2] = 0; //@line 196 "nstrumenta.cpp"
  ;HEAP8[$21>>0]=HEAP8[$40>>0]|0;HEAP8[$21+1>>0]=HEAP8[$40+1>>0]|0;HEAP8[$21+2>>0]=HEAP8[$40+2>>0]|0;HEAP8[$21+3>>0]=HEAP8[$40+3>>0]|0;HEAP8[$21+4>>0]=HEAP8[$40+4>>0]|0;HEAP8[$21+5>>0]=HEAP8[$40+5>>0]|0;HEAP8[$21+6>>0]=HEAP8[$40+6>>0]|0;HEAP8[$21+7>>0]=HEAP8[$40+7>>0]|0;
  $$field = HEAP32[$21>>2]|0;
  $$index3 = ((($21)) + 4|0);
  $$field4 = HEAP32[$$index3>>2]|0;
  $16 = $63;
- $17 = 875;
+ $17 = 895;
  HEAP32[$18>>2] = $$field;
  $$index7 = ((($18)) + 4|0);
  HEAP32[$$index7>>2] = $$field4;
@@ -3780,15 +3852,15 @@ function __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev($0) {
  $78 = $19; //@line 1279 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $79 = (__ZN10emscripten8internal10getContextIM10NstrumentaFvvEEEPT_RKS5_($18)|0); //@line 1280 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  __embind_register_class_function(($72|0),($73|0),($74|0),($75|0),($77|0),($78|0),($79|0),0); //@line 1273 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- HEAP32[$41>>2] = (30); //@line 200 "nstrumenta.cpp"
- $$index9 = ((($41)) + 4|0); //@line 200 "nstrumenta.cpp"
- HEAP32[$$index9>>2] = 0; //@line 200 "nstrumenta.cpp"
+ HEAP32[$41>>2] = (30); //@line 197 "nstrumenta.cpp"
+ $$index9 = ((($41)) + 4|0); //@line 197 "nstrumenta.cpp"
+ HEAP32[$$index9>>2] = 0; //@line 197 "nstrumenta.cpp"
  ;HEAP8[$14>>0]=HEAP8[$41>>0]|0;HEAP8[$14+1>>0]=HEAP8[$41+1>>0]|0;HEAP8[$14+2>>0]=HEAP8[$41+2>>0]|0;HEAP8[$14+3>>0]=HEAP8[$41+3>>0]|0;HEAP8[$14+4>>0]=HEAP8[$41+4>>0]|0;HEAP8[$14+5>>0]=HEAP8[$41+5>>0]|0;HEAP8[$14+6>>0]=HEAP8[$41+6>>0]|0;HEAP8[$14+7>>0]=HEAP8[$41+7>>0]|0;
  $$field11 = HEAP32[$14>>2]|0;
  $$index13 = ((($14)) + 4|0);
  $$field14 = HEAP32[$$index13>>2]|0;
  $9 = $71;
- $10 = 880;
+ $10 = 900;
  HEAP32[$11>>2] = $$field11;
  $$index17 = ((($11)) + 4|0);
  HEAP32[$$index17>>2] = $$field14;
@@ -3804,30 +3876,30 @@ function __ZN39EmscriptenBindingInitializer_nstrumentaC2Ev($0) {
  $87 = $12; //@line 1279 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $88 = (__ZN10emscripten8internal10getContextIM10NstrumentaFvidEEEPT_RKS5_($11)|0); //@line 1280 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  __embind_register_class_function(($81|0),($82|0),($83|0),($84|0),($86|0),($87|0),($88|0),0); //@line 1273 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- HEAP32[$42>>2] = (32); //@line 201 "nstrumenta.cpp"
- $$index19 = ((($42)) + 4|0); //@line 201 "nstrumenta.cpp"
- HEAP32[$$index19>>2] = 0; //@line 201 "nstrumenta.cpp"
+ HEAP32[$42>>2] = (32); //@line 198 "nstrumenta.cpp"
+ $$index19 = ((($42)) + 4|0); //@line 198 "nstrumenta.cpp"
+ HEAP32[$$index19>>2] = 0; //@line 198 "nstrumenta.cpp"
  ;HEAP8[$7>>0]=HEAP8[$42>>0]|0;HEAP8[$7+1>>0]=HEAP8[$42+1>>0]|0;HEAP8[$7+2>>0]=HEAP8[$42+2>>0]|0;HEAP8[$7+3>>0]=HEAP8[$42+3>>0]|0;HEAP8[$7+4>>0]=HEAP8[$42+4>>0]|0;HEAP8[$7+5>>0]=HEAP8[$42+5>>0]|0;HEAP8[$7+6>>0]=HEAP8[$42+6>>0]|0;HEAP8[$7+7>>0]=HEAP8[$42+7>>0]|0;
  $$field21 = HEAP32[$7>>2]|0;
  $$index23 = ((($7)) + 4|0);
  $$field24 = HEAP32[$$index23>>2]|0;
  $2 = $80;
- $3 = 893;
+ $3 = 913;
  HEAP32[$4>>2] = $$field21;
  $$index27 = ((($4)) + 4|0);
  HEAP32[$$index27>>2] = $$field24;
  $5 = 33; //@line 1270 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $89 = (__ZN10emscripten8internal6TypeIDI10NstrumentaE3getEv()|0); //@line 1274 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $90 = $3; //@line 1275 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $91 = (__ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEE8getCountEv($6)|0); //@line 1276 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $92 = (__ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEE8getTypesEv($6)|0); //@line 1277 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $91 = (__ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEE8getCountEv($6)|0); //@line 1276 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $92 = (__ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEE8getTypesEv($6)|0); //@line 1277 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $93 = $5; //@line 1278 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $1 = $93;
- $94 = (__ZN10emscripten8internal19getGenericSignatureIJiiidiiddddddddEEEPKcv()|0); //@line 399 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $94 = (__ZN10emscripten8internal19getGenericSignatureIJiiidiidddddddddEEEPKcv()|0); //@line 399 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $95 = $5; //@line 1279 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $96 = (__ZN10emscripten8internal10getContextIM10NstrumentaFidjiddddddddEEEPT_RKS5_($4)|0); //@line 1280 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $96 = (__ZN10emscripten8internal10getContextIM10NstrumentaFidjidddddddddEEEPT_RKS5_($4)|0); //@line 1280 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  __embind_register_class_function(($89|0),($90|0),($91|0),($92|0),($94|0),($95|0),($96|0),0); //@line 1273 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- STACKTOP = sp;return; //@line 202 "nstrumenta.cpp"
+ STACKTOP = sp;return; //@line 199 "nstrumenta.cpp"
 }
 function __ZN10Nstrumenta4initEv($0) {
  $0 = $0|0;
@@ -3843,8 +3915,8 @@ function __ZN10Nstrumenta12setParameterEid($0,$1,$2) {
  $1 = $1|0;
  $2 = +$2;
  var $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0.0, $27 = 0.0, $28 = 0.0, $29 = 0.0;
- var $3 = 0, $30 = 0.0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0.0, $36 = 0.0, $37 = 0.0, $38 = 0.0, $39 = 0.0, $4 = 0, $40 = 0.0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0, $5 = 0.0, $6 = 0;
- var $7 = 0.0, $8 = 0.0, $9 = 0.0, label = 0, sp = 0;
+ var $3 = 0, $30 = 0.0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0.0, $36 = 0.0, $37 = 0.0, $38 = 0.0, $39 = 0.0, $4 = 0, $40 = 0.0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0, $46 = 0.0, $5 = 0.0;
+ var $6 = 0, $7 = 0.0, $8 = 0.0, $9 = 0.0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $3 = $0;
@@ -3855,134 +3927,131 @@ function __ZN10Nstrumenta12setParameterEid($0,$1,$2) {
   switch ($6|0) {
   case 0:  {
    $7 = $5; //@line 28 "nstrumenta.cpp"
-   HEAPF64[(4096)>>3] = $7; //@line 28 "nstrumenta.cpp"
+   $8 = $7; //@line 28 "nstrumenta.cpp"
+   HEAPF32[(4036)>>2] = $8; //@line 28 "nstrumenta.cpp"
    break;
   }
   case 1:  {
-   $8 = $5; //@line 33 "nstrumenta.cpp"
-   HEAPF64[(4088)>>3] = $8; //@line 33 "nstrumenta.cpp"
+   $9 = $5; //@line 33 "nstrumenta.cpp"
+   $10 = $9; //@line 33 "nstrumenta.cpp"
+   HEAPF32[(4040)>>2] = $10; //@line 33 "nstrumenta.cpp"
    break;
   }
   case 2:  {
-   $9 = $5; //@line 38 "nstrumenta.cpp"
-   HEAPF64[(4144)>>3] = $9; //@line 38 "nstrumenta.cpp"
+   $11 = $5; //@line 38 "nstrumenta.cpp"
+   $12 = $11; //@line 38 "nstrumenta.cpp"
+   HEAPF32[(4044)>>2] = $12; //@line 38 "nstrumenta.cpp"
    break;
   }
   case 3:  {
-   $10 = $5; //@line 43 "nstrumenta.cpp"
-   $11 = $10; //@line 43 "nstrumenta.cpp"
-   HEAPF32[(4104)>>2] = $11; //@line 43 "nstrumenta.cpp"
+   $13 = $5; //@line 43 "nstrumenta.cpp"
+   $14 = $13; //@line 43 "nstrumenta.cpp"
+   HEAPF32[(4048)>>2] = $14; //@line 43 "nstrumenta.cpp"
    break;
   }
   case 4:  {
-   $12 = $5; //@line 48 "nstrumenta.cpp"
-   $13 = $12; //@line 48 "nstrumenta.cpp"
-   HEAPF32[(4108)>>2] = $13; //@line 48 "nstrumenta.cpp"
+   $15 = $5; //@line 48 "nstrumenta.cpp"
+   $16 = $15; //@line 48 "nstrumenta.cpp"
+   HEAPF32[(4052)>>2] = $16; //@line 48 "nstrumenta.cpp"
    break;
   }
   case 5:  {
-   $14 = $5; //@line 53 "nstrumenta.cpp"
-   $15 = $14; //@line 53 "nstrumenta.cpp"
-   HEAPF32[(4112)>>2] = $15; //@line 53 "nstrumenta.cpp"
+   $17 = $5; //@line 53 "nstrumenta.cpp"
+   $18 = $17; //@line 53 "nstrumenta.cpp"
+   HEAPF32[(4056)>>2] = $18; //@line 53 "nstrumenta.cpp"
    break;
   }
   case 6:  {
-   $16 = $5; //@line 58 "nstrumenta.cpp"
-   $17 = $16; //@line 58 "nstrumenta.cpp"
-   HEAPF32[(4116)>>2] = $17; //@line 58 "nstrumenta.cpp"
+   $19 = $5; //@line 58 "nstrumenta.cpp"
+   $20 = $19; //@line 58 "nstrumenta.cpp"
+   HEAPF32[(4072)>>2] = $20; //@line 58 "nstrumenta.cpp"
    break;
   }
   case 7:  {
-   $18 = $5; //@line 63 "nstrumenta.cpp"
-   $19 = $18; //@line 63 "nstrumenta.cpp"
-   HEAPF32[(4120)>>2] = $19; //@line 63 "nstrumenta.cpp"
+   $21 = $5; //@line 63 "nstrumenta.cpp"
+   $22 = $21; //@line 63 "nstrumenta.cpp"
+   HEAPF32[(4076)>>2] = $22; //@line 63 "nstrumenta.cpp"
    break;
   }
   case 8:  {
-   $20 = $5; //@line 68 "nstrumenta.cpp"
-   $21 = $20; //@line 68 "nstrumenta.cpp"
-   HEAPF32[(4124)>>2] = $21; //@line 68 "nstrumenta.cpp"
+   $23 = $5; //@line 68 "nstrumenta.cpp"
+   $24 = $23; //@line 68 "nstrumenta.cpp"
+   HEAPF32[(4080)>>2] = $24; //@line 68 "nstrumenta.cpp"
    break;
   }
   case 9:  {
-   $22 = $5; //@line 73 "nstrumenta.cpp"
-   $23 = $22; //@line 73 "nstrumenta.cpp"
-   HEAPF32[(4128)>>2] = $23; //@line 73 "nstrumenta.cpp"
+   $25 = $5; //@line 73 "nstrumenta.cpp"
+   $26 = $25; //@line 73 "nstrumenta.cpp"
+   HEAPF32[(4084)>>2] = $26; //@line 73 "nstrumenta.cpp"
    break;
   }
   case 10:  {
-   $24 = $5; //@line 78 "nstrumenta.cpp"
-   $25 = $24; //@line 78 "nstrumenta.cpp"
-   HEAPF32[(4132)>>2] = $25; //@line 78 "nstrumenta.cpp"
+   $27 = $5; //@line 78 "nstrumenta.cpp"
+   $28 = $27; //@line 78 "nstrumenta.cpp"
+   HEAPF32[(4088)>>2] = $28; //@line 78 "nstrumenta.cpp"
    break;
   }
   case 11:  {
-   $26 = $5; //@line 83 "nstrumenta.cpp"
-   $27 = $26; //@line 83 "nstrumenta.cpp"
-   HEAPF32[(4136)>>2] = $27; //@line 83 "nstrumenta.cpp"
+   $29 = $5; //@line 83 "nstrumenta.cpp"
+   $30 = $29; //@line 83 "nstrumenta.cpp"
+   HEAPF32[(4092)>>2] = $30; //@line 83 "nstrumenta.cpp"
    break;
   }
   case 12:  {
-   $28 = $5; //@line 88 "nstrumenta.cpp"
-   $29 = $28; //@line 88 "nstrumenta.cpp"
-   HEAPF32[(4152)>>2] = $29; //@line 88 "nstrumenta.cpp"
+   $31 = $5; //@line 88 "nstrumenta.cpp"
+   $32 = $31; //@line 88 "nstrumenta.cpp"
+   HEAPF32[(3996)>>2] = $32; //@line 88 "nstrumenta.cpp"
    break;
   }
   case 13:  {
-   $30 = $5; //@line 93 "nstrumenta.cpp"
-   $31 = $30; //@line 93 "nstrumenta.cpp"
-   HEAPF32[(4156)>>2] = $31; //@line 93 "nstrumenta.cpp"
+   $33 = $5; //@line 93 "nstrumenta.cpp"
+   $34 = $33; //@line 93 "nstrumenta.cpp"
+   HEAPF32[(4000)>>2] = $34; //@line 93 "nstrumenta.cpp"
    break;
   }
   case 14:  {
-   $32 = $5; //@line 98 "nstrumenta.cpp"
-   $33 = $32; //@line 98 "nstrumenta.cpp"
-   HEAPF32[(4160)>>2] = $33; //@line 98 "nstrumenta.cpp"
+   $35 = $5; //@line 98 "nstrumenta.cpp"
+   $36 = $35; //@line 98 "nstrumenta.cpp"
+   HEAPF32[(4004)>>2] = $36; //@line 98 "nstrumenta.cpp"
    break;
   }
   case 15:  {
-   $34 = $5; //@line 103 "nstrumenta.cpp"
-   $35 = $34; //@line 103 "nstrumenta.cpp"
-   HEAPF32[(4164)>>2] = $35; //@line 103 "nstrumenta.cpp"
+   $37 = $5; //@line 103 "nstrumenta.cpp"
+   $38 = $37; //@line 103 "nstrumenta.cpp"
+   HEAPF32[(4008)>>2] = $38; //@line 103 "nstrumenta.cpp"
    break;
   }
   case 16:  {
-   $36 = $5; //@line 108 "nstrumenta.cpp"
-   $37 = $36; //@line 108 "nstrumenta.cpp"
-   HEAPF32[(4168)>>2] = $37; //@line 108 "nstrumenta.cpp"
+   $39 = $5; //@line 108 "nstrumenta.cpp"
+   $40 = $39; //@line 108 "nstrumenta.cpp"
+   HEAPF32[(4012)>>2] = $40; //@line 108 "nstrumenta.cpp"
    break;
   }
   case 17:  {
-   $38 = $5; //@line 113 "nstrumenta.cpp"
-   $39 = $38; //@line 113 "nstrumenta.cpp"
-   HEAPF32[(4172)>>2] = $39; //@line 113 "nstrumenta.cpp"
+   $41 = $5; //@line 113 "nstrumenta.cpp"
+   $42 = $41; //@line 113 "nstrumenta.cpp"
+   HEAPF32[(4016)>>2] = $42; //@line 113 "nstrumenta.cpp"
    break;
   }
   case 18:  {
-   $40 = $5; //@line 118 "nstrumenta.cpp"
-   $41 = $40; //@line 118 "nstrumenta.cpp"
-   HEAPF32[(4176)>>2] = $41; //@line 118 "nstrumenta.cpp"
+   $43 = $5; //@line 118 "nstrumenta.cpp"
+   $44 = $43; //@line 118 "nstrumenta.cpp"
+   HEAPF32[(3976)>>2] = $44; //@line 118 "nstrumenta.cpp"
    break;
   }
   case 19:  {
-   $42 = $5; //@line 123 "nstrumenta.cpp"
-   $43 = $42; //@line 123 "nstrumenta.cpp"
-   HEAPF32[(4180)>>2] = $43; //@line 123 "nstrumenta.cpp"
-   break;
-  }
-  case 20:  {
-   $44 = $5; //@line 128 "nstrumenta.cpp"
-   $45 = $44; //@line 128 "nstrumenta.cpp"
-   HEAPF32[(4184)>>2] = $45; //@line 128 "nstrumenta.cpp"
+   $45 = $5; //@line 123 "nstrumenta.cpp"
+   $46 = $45; //@line 123 "nstrumenta.cpp"
+   HEAPF32[(3980)>>2] = $46; //@line 123 "nstrumenta.cpp"
    break;
   }
   default: {
   }
   }
  } while(0);
- STACKTOP = sp;return; //@line 132 "nstrumenta.cpp"
+ STACKTOP = sp;return; //@line 127 "nstrumenta.cpp"
 }
-function __ZN10Nstrumenta11ReportEventEdjidddddddd($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) {
+function __ZN10Nstrumenta11ReportEventEdjiddddddddd($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) {
  $0 = $0|0;
  $1 = +$1;
  $2 = $2|0;
@@ -3995,118 +4064,125 @@ function __ZN10Nstrumenta11ReportEventEdjidddddddd($0,$1,$2,$3,$4,$5,$6,$7,$8,$9
  $9 = +$9;
  $10 = +$10;
  $11 = +$11;
- var $$byval_copy = 0, $12 = 0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0, $30 = 0.0;
- var $31 = 0, $32 = 0, $33 = 0.0, $34 = 0, $35 = 0.0, $36 = 0, $37 = 0, $38 = 0.0, $39 = 0, $40 = 0, $41 = 0.0, $42 = 0, $43 = 0, $44 = 0.0, $45 = 0, $46 = 0, $47 = 0.0, $48 = 0, $49 = 0, $50 = 0.0;
- var $51 = 0, $52 = 0, $53 = 0.0, $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0, $59 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0.0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $70 = 0;
- var $71 = 0, $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0, $78 = 0, $79 = 0, $80 = 0.0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0, $86 = 0, label = 0, sp = 0;
+ $12 = +$12;
+ var $$byval_copy = 0, $13 = 0, $14 = 0.0, $15 = 0, $16 = 0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0, $27 = 0, $28 = 0, $29 = 0, $30 = 0, $31 = 0;
+ var $32 = 0.0, $33 = 0, $34 = 0, $35 = 0.0, $36 = 0, $37 = 0.0, $38 = 0, $39 = 0, $40 = 0.0, $41 = 0, $42 = 0, $43 = 0.0, $44 = 0, $45 = 0, $46 = 0.0, $47 = 0, $48 = 0, $49 = 0.0, $50 = 0, $51 = 0;
+ var $52 = 0.0, $53 = 0, $54 = 0, $55 = 0.0, $56 = 0, $57 = 0, $58 = 0.0, $59 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0.0, $69 = 0, $70 = 0, $71 = 0;
+ var $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0, $78 = 0, $79 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0.0, $86 = 0, $87 = 0, $88 = 0, $89 = 0, $90 = 0, $91 = 0;
+ var label = 0, sp = 0;
  sp = STACKTOP;
- STACKTOP = STACKTOP + 2832|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(2832|0);
- $$byval_copy = sp + 2664|0;
- $24 = sp + 2448|0;
- $25 = sp + 144|0;
- $26 = sp + 2816|0;
+ STACKTOP = STACKTOP + 2848|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(2848|0);
+ $$byval_copy = sp + 2672|0;
+ $26 = sp + 2448|0;
  $27 = sp;
- $12 = $0;
- $13 = $1;
- $14 = $2;
- $15 = $3;
- $16 = $4;
- $17 = $5;
- $18 = $6;
- $19 = $7;
- $20 = $8;
- $21 = $9;
- $22 = $10;
- $23 = $11;
- HEAP32[$26>>2] = 0; //@line 148 "nstrumenta.cpp"
- $30 = $13; //@line 150 "nstrumenta.cpp"
- HEAPF64[$24>>3] = $30; //@line 150 "nstrumenta.cpp"
- $31 = $14; //@line 151 "nstrumenta.cpp"
- $32 = ((($24)) + 8|0); //@line 151 "nstrumenta.cpp"
- HEAP32[$32>>2] = $31; //@line 151 "nstrumenta.cpp"
- $33 = $16; //@line 152 "nstrumenta.cpp"
- $34 = ((($24)) + 16|0); //@line 152 "nstrumenta.cpp"
- HEAPF64[$34>>3] = $33; //@line 152 "nstrumenta.cpp"
- $35 = $17; //@line 153 "nstrumenta.cpp"
- $36 = ((($24)) + 16|0); //@line 153 "nstrumenta.cpp"
- $37 = ((($36)) + 8|0); //@line 153 "nstrumenta.cpp"
- HEAPF64[$37>>3] = $35; //@line 153 "nstrumenta.cpp"
- $38 = $18; //@line 154 "nstrumenta.cpp"
- $39 = ((($24)) + 16|0); //@line 154 "nstrumenta.cpp"
- $40 = ((($39)) + 16|0); //@line 154 "nstrumenta.cpp"
- HEAPF64[$40>>3] = $38; //@line 154 "nstrumenta.cpp"
- $41 = $19; //@line 155 "nstrumenta.cpp"
- $42 = ((($24)) + 16|0); //@line 155 "nstrumenta.cpp"
- $43 = ((($42)) + 24|0); //@line 155 "nstrumenta.cpp"
- HEAPF64[$43>>3] = $41; //@line 155 "nstrumenta.cpp"
- $44 = $20; //@line 156 "nstrumenta.cpp"
- $45 = ((($24)) + 16|0); //@line 156 "nstrumenta.cpp"
- $46 = ((($45)) + 32|0); //@line 156 "nstrumenta.cpp"
- HEAPF64[$46>>3] = $44; //@line 156 "nstrumenta.cpp"
- $47 = $21; //@line 157 "nstrumenta.cpp"
- $48 = ((($24)) + 16|0); //@line 157 "nstrumenta.cpp"
- $49 = ((($48)) + 40|0); //@line 157 "nstrumenta.cpp"
- HEAPF64[$49>>3] = $47; //@line 157 "nstrumenta.cpp"
- $50 = $22; //@line 158 "nstrumenta.cpp"
- $51 = ((($24)) + 16|0); //@line 158 "nstrumenta.cpp"
- $52 = ((($51)) + 48|0); //@line 158 "nstrumenta.cpp"
- HEAPF64[$52>>3] = $50; //@line 158 "nstrumenta.cpp"
- $53 = $23; //@line 159 "nstrumenta.cpp"
- $54 = ((($24)) + 16|0); //@line 159 "nstrumenta.cpp"
- $55 = ((($54)) + 56|0); //@line 159 "nstrumenta.cpp"
- HEAPF64[$55>>3] = $53; //@line 159 "nstrumenta.cpp"
- _memcpy(($27|0),($24|0),144)|0; //@line 161 "nstrumenta.cpp"
- _memcpy(($$byval_copy|0),($27|0),144)|0; //@line 161 "nstrumenta.cpp"
- _algorithm_update($$byval_copy,$25,$26); //@line 161 "nstrumenta.cpp"
- $56 = HEAP32[$26>>2]|0; //@line 163 "nstrumenta.cpp"
- $57 = ($56|0)>(0); //@line 163 "nstrumenta.cpp"
- if (!($57)) {
-  STACKTOP = sp;return 0; //@line 188 "nstrumenta.cpp"
+ $28 = sp + 2824|0;
+ $29 = sp + 2304|0;
+ $13 = $0;
+ $14 = $1;
+ $15 = $2;
+ $16 = $3;
+ $17 = $4;
+ $18 = $5;
+ $19 = $6;
+ $20 = $7;
+ $21 = $8;
+ $22 = $9;
+ $23 = $10;
+ $24 = $11;
+ $25 = $12;
+ HEAP32[$28>>2] = 0; //@line 144 "nstrumenta.cpp"
+ $32 = $14; //@line 146 "nstrumenta.cpp"
+ HEAPF64[$26>>3] = $32; //@line 146 "nstrumenta.cpp"
+ $33 = $15; //@line 147 "nstrumenta.cpp"
+ $34 = ((($26)) + 8|0); //@line 147 "nstrumenta.cpp"
+ HEAP32[$34>>2] = $33; //@line 147 "nstrumenta.cpp"
+ $35 = $17; //@line 148 "nstrumenta.cpp"
+ $36 = ((($26)) + 16|0); //@line 148 "nstrumenta.cpp"
+ HEAPF64[$36>>3] = $35; //@line 148 "nstrumenta.cpp"
+ $37 = $18; //@line 149 "nstrumenta.cpp"
+ $38 = ((($26)) + 16|0); //@line 149 "nstrumenta.cpp"
+ $39 = ((($38)) + 8|0); //@line 149 "nstrumenta.cpp"
+ HEAPF64[$39>>3] = $37; //@line 149 "nstrumenta.cpp"
+ $40 = $19; //@line 150 "nstrumenta.cpp"
+ $41 = ((($26)) + 16|0); //@line 150 "nstrumenta.cpp"
+ $42 = ((($41)) + 16|0); //@line 150 "nstrumenta.cpp"
+ HEAPF64[$42>>3] = $40; //@line 150 "nstrumenta.cpp"
+ $43 = $20; //@line 151 "nstrumenta.cpp"
+ $44 = ((($26)) + 16|0); //@line 151 "nstrumenta.cpp"
+ $45 = ((($44)) + 24|0); //@line 151 "nstrumenta.cpp"
+ HEAPF64[$45>>3] = $43; //@line 151 "nstrumenta.cpp"
+ $46 = $21; //@line 152 "nstrumenta.cpp"
+ $47 = ((($26)) + 16|0); //@line 152 "nstrumenta.cpp"
+ $48 = ((($47)) + 32|0); //@line 152 "nstrumenta.cpp"
+ HEAPF64[$48>>3] = $46; //@line 152 "nstrumenta.cpp"
+ $49 = $22; //@line 153 "nstrumenta.cpp"
+ $50 = ((($26)) + 16|0); //@line 153 "nstrumenta.cpp"
+ $51 = ((($50)) + 40|0); //@line 153 "nstrumenta.cpp"
+ HEAPF64[$51>>3] = $49; //@line 153 "nstrumenta.cpp"
+ $52 = $23; //@line 154 "nstrumenta.cpp"
+ $53 = ((($26)) + 16|0); //@line 154 "nstrumenta.cpp"
+ $54 = ((($53)) + 48|0); //@line 154 "nstrumenta.cpp"
+ HEAPF64[$54>>3] = $52; //@line 154 "nstrumenta.cpp"
+ $55 = $24; //@line 155 "nstrumenta.cpp"
+ $56 = ((($26)) + 16|0); //@line 155 "nstrumenta.cpp"
+ $57 = ((($56)) + 56|0); //@line 155 "nstrumenta.cpp"
+ HEAPF64[$57>>3] = $55; //@line 155 "nstrumenta.cpp"
+ $58 = $25; //@line 156 "nstrumenta.cpp"
+ $59 = ((($26)) + 16|0); //@line 156 "nstrumenta.cpp"
+ $60 = ((($59)) + 64|0); //@line 156 "nstrumenta.cpp"
+ HEAPF64[$60>>3] = $58; //@line 156 "nstrumenta.cpp"
+ _memcpy(($29|0),($26|0),144)|0; //@line 158 "nstrumenta.cpp"
+ _memcpy(($$byval_copy|0),($29|0),144)|0; //@line 158 "nstrumenta.cpp"
+ _algorithm_update($$byval_copy,$27,$28); //@line 158 "nstrumenta.cpp"
+ $61 = HEAP32[$28>>2]|0; //@line 160 "nstrumenta.cpp"
+ $62 = ($61|0)>(0); //@line 160 "nstrumenta.cpp"
+ if (!($62)) {
+  STACKTOP = sp;return 0; //@line 185 "nstrumenta.cpp"
  }
- $28 = 0; //@line 165 "nstrumenta.cpp"
+ $30 = 0; //@line 162 "nstrumenta.cpp"
  while(1) {
-  $58 = $28; //@line 165 "nstrumenta.cpp"
-  $59 = HEAP32[$26>>2]|0; //@line 165 "nstrumenta.cpp"
-  $60 = ($58|0)<($59|0); //@line 165 "nstrumenta.cpp"
-  if (!($60)) {
+  $63 = $30; //@line 162 "nstrumenta.cpp"
+  $64 = HEAP32[$28>>2]|0; //@line 162 "nstrumenta.cpp"
+  $65 = ($63|0)<($64|0); //@line 162 "nstrumenta.cpp"
+  if (!($65)) {
    break;
   }
-  $61 = $28; //@line 167 "nstrumenta.cpp"
-  $62 = (($25) + (($61*144)|0)|0); //@line 167 "nstrumenta.cpp"
-  $63 = +HEAPF64[$62>>3]; //@line 167 "nstrumenta.cpp"
-  $64 = $28; //@line 167 "nstrumenta.cpp"
-  $65 = (($25) + (($64*144)|0)|0); //@line 167 "nstrumenta.cpp"
-  $66 = ((($65)) + 8|0); //@line 167 "nstrumenta.cpp"
-  $67 = HEAP32[$66>>2]|0; //@line 167 "nstrumenta.cpp"
-  $68 = _emscripten_asm_const_idi(0,(+$63),($67|0))|0; //@line 167 "nstrumenta.cpp"
-  $29 = 0; //@line 175 "nstrumenta.cpp"
+  $66 = $30; //@line 164 "nstrumenta.cpp"
+  $67 = (($27) + (($66*144)|0)|0); //@line 164 "nstrumenta.cpp"
+  $68 = +HEAPF64[$67>>3]; //@line 164 "nstrumenta.cpp"
+  $69 = $30; //@line 164 "nstrumenta.cpp"
+  $70 = (($27) + (($69*144)|0)|0); //@line 164 "nstrumenta.cpp"
+  $71 = ((($70)) + 8|0); //@line 164 "nstrumenta.cpp"
+  $72 = HEAP32[$71>>2]|0; //@line 164 "nstrumenta.cpp"
+  $73 = _emscripten_asm_const_idi(0,(+$68),($72|0))|0; //@line 164 "nstrumenta.cpp"
+  $31 = 0; //@line 172 "nstrumenta.cpp"
   while(1) {
-   $69 = $29; //@line 175 "nstrumenta.cpp"
-   $70 = $28; //@line 175 "nstrumenta.cpp"
-   $71 = (($25) + (($70*144)|0)|0); //@line 175 "nstrumenta.cpp"
-   $72 = ((($71)) + 12|0); //@line 175 "nstrumenta.cpp"
-   $73 = HEAP32[$72>>2]|0; //@line 175 "nstrumenta.cpp"
-   $74 = ($69|0)<($73|0); //@line 175 "nstrumenta.cpp"
-   if (!($74)) {
+   $74 = $31; //@line 172 "nstrumenta.cpp"
+   $75 = $30; //@line 172 "nstrumenta.cpp"
+   $76 = (($27) + (($75*144)|0)|0); //@line 172 "nstrumenta.cpp"
+   $77 = ((($76)) + 12|0); //@line 172 "nstrumenta.cpp"
+   $78 = HEAP32[$77>>2]|0; //@line 172 "nstrumenta.cpp"
+   $79 = ($74|0)<($78|0); //@line 172 "nstrumenta.cpp"
+   if (!($79)) {
     break;
    }
-   $75 = $28; //@line 177 "nstrumenta.cpp"
-   $76 = (($25) + (($75*144)|0)|0); //@line 177 "nstrumenta.cpp"
-   $77 = ((($76)) + 16|0); //@line 177 "nstrumenta.cpp"
-   $78 = $29; //@line 177 "nstrumenta.cpp"
-   $79 = (($77) + ($78<<3)|0); //@line 177 "nstrumenta.cpp"
-   $80 = +HEAPF64[$79>>3]; //@line 177 "nstrumenta.cpp"
-   $81 = _emscripten_asm_const_id(1,(+$80))|0; //@line 177 "nstrumenta.cpp"
-   $82 = $29; //@line 175 "nstrumenta.cpp"
-   $83 = (($82) + 1)|0; //@line 175 "nstrumenta.cpp"
-   $29 = $83; //@line 175 "nstrumenta.cpp"
+   $80 = $30; //@line 174 "nstrumenta.cpp"
+   $81 = (($27) + (($80*144)|0)|0); //@line 174 "nstrumenta.cpp"
+   $82 = ((($81)) + 16|0); //@line 174 "nstrumenta.cpp"
+   $83 = $31; //@line 174 "nstrumenta.cpp"
+   $84 = (($82) + ($83<<3)|0); //@line 174 "nstrumenta.cpp"
+   $85 = +HEAPF64[$84>>3]; //@line 174 "nstrumenta.cpp"
+   $86 = _emscripten_asm_const_id(1,(+$85))|0; //@line 174 "nstrumenta.cpp"
+   $87 = $31; //@line 172 "nstrumenta.cpp"
+   $88 = (($87) + 1)|0; //@line 172 "nstrumenta.cpp"
+   $31 = $88; //@line 172 "nstrumenta.cpp"
   }
-  $84 = _emscripten_asm_const_ii(2,0)|0; //@line 182 "nstrumenta.cpp"
-  $85 = $28; //@line 165 "nstrumenta.cpp"
-  $86 = (($85) + 1)|0; //@line 165 "nstrumenta.cpp"
-  $28 = $86; //@line 165 "nstrumenta.cpp"
+  $89 = _emscripten_asm_const_ii(2,0)|0; //@line 179 "nstrumenta.cpp"
+  $90 = $30; //@line 162 "nstrumenta.cpp"
+  $91 = (($90) + 1)|0; //@line 162 "nstrumenta.cpp"
+  $30 = $91; //@line 162 "nstrumenta.cpp"
  }
- STACKTOP = sp;return 0; //@line 188 "nstrumenta.cpp"
+ STACKTOP = sp;return 0; //@line 185 "nstrumenta.cpp"
 }
 function __ZN10emscripten8internal11NoBaseClass6verifyI10NstrumentaEEvv() {
  var label = 0, sp = 0;
@@ -4175,42 +4251,42 @@ function __ZN10emscripten8internal14getLightTypeIDI10NstrumentaEEPKvRKT_($0) {
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- STACKTOP = sp;return (8|0); //@line 82 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ STACKTOP = sp;return (112|0); //@line 82 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDI10NstrumentaE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (8|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (112|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDIP10NstrumentaE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (16|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (120|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDIPK10NstrumentaE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (32|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (136|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal19getGenericSignatureIJiiEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1169|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (1189|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
 function __ZN10emscripten8internal19getGenericSignatureIJvEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1172|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (1192|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
 function __ZN10emscripten8internal19getGenericSignatureIJviEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1174|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (1194|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
 function __ZN10emscripten8internal12operator_newI10NstrumentaJEEEPT_DpOT0_() {
  var $0 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- $0 = (__Znwj(1)|0); //@line 433 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $0 = (__Znwm(1)|0); //@line 433 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  __ZN10NstrumentaC2Ev($0); //@line 433 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  return ($0|0); //@line 433 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
@@ -4254,7 +4330,7 @@ function __ZN10emscripten8internal11BindingTypeIP10NstrumentaE10toWireTypeES3_($
 function __ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJNS0_17AllowedRawPointerI10NstrumentaEEEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (464|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (568|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10NstrumentaC2Ev($0) {
  $0 = $0|0;
@@ -4320,7 +4396,7 @@ function __ZN10emscripten8internal10getContextIM10NstrumentaFvvEEEPT_RKS5_($0) {
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- $2 = (__Znwj(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $2 = (__Znwm(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $3 = $1; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$field = HEAP32[$3>>2]|0; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$index1 = ((($3)) + 4|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
@@ -4342,12 +4418,12 @@ function __ZN10emscripten8internal11BindingTypeIP10NstrumentaE12fromWireTypeES3_
 function __ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJvNS0_17AllowedRawPointerI10NstrumentaEEEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (468|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (572|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal19getGenericSignatureIJviiEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1177|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (1197|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
 function __ZN10emscripten8internal13MethodInvokerIM10NstrumentaFvidEvPS2_JidEE6invokeERKS4_S5_id($0,$1,$2,$3) {
  $0 = $0|0;
@@ -4411,7 +4487,7 @@ function __ZN10emscripten8internal10getContextIM10NstrumentaFvidEEEPT_RKS5_($0) 
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- $2 = (__Znwj(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $2 = (__Znwm(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $3 = $1; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$field = HEAP32[$3>>2]|0; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$index1 = ((($3)) + 4|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
@@ -4442,14 +4518,14 @@ function __ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($0) {
 function __ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJvNS0_17AllowedRawPointerI10NstrumentaEEidEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (476|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (16|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal19getGenericSignatureIJviiidEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1181|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (1201|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
-function __ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjiddddddddEiPS2_JdjiddddddddEE6invokeERKS4_S5_djidddddddd($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) {
+function __ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjidddddddddEiPS2_JdjidddddddddEE6invokeERKS4_S5_djiddddddddd($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) {
  $0 = $0|0;
  $1 = $1|0;
  $2 = +$2;
@@ -4463,52 +4539,52 @@ function __ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjiddddddddEiPS
  $10 = +$10;
  $11 = +$11;
  $12 = +$12;
- var $$field = 0, $$field2 = 0, $$index1 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0, $17 = 0, $18 = 0.0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0.0, $39 = 0.0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0.0, $45 = 0.0, $46 = 0.0, $47 = 0.0, $48 = 0.0, $49 = 0.0;
- var $50 = 0.0, $51 = 0.0, $52 = 0.0, $53 = 0.0, $54 = 0.0, $55 = 0.0, $56 = 0.0, $57 = 0.0, $58 = 0.0, $59 = 0.0, $60 = 0, $61 = 0, $62 = 0, label = 0, sp = 0;
+ $13 = +$13;
+ var $$field = 0, $$field2 = 0, $$index1 = 0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0, $18 = 0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0.0, $27 = 0.0, $28 = 0, $29 = 0, $30 = 0;
+ var $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $40 = 0.0, $41 = 0.0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0.0, $47 = 0.0, $48 = 0.0, $49 = 0.0, $50 = 0.0;
+ var $51 = 0.0, $52 = 0.0, $53 = 0.0, $54 = 0.0, $55 = 0.0, $56 = 0.0, $57 = 0.0, $58 = 0.0, $59 = 0.0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0.0, $64 = 0, $65 = 0, $66 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- STACKTOP = STACKTOP + 96|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(96|0);
- $26 = sp + 72|0;
- $13 = $0;
- $14 = $1;
- $15 = $2;
- $16 = $3;
- $17 = $4;
- $18 = $5;
- $19 = $6;
- $20 = $7;
- $21 = $8;
- $22 = $9;
- $23 = $10;
- $24 = $11;
- $25 = $12;
- $27 = $14; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $28 = (__ZN10emscripten8internal11BindingTypeIP10NstrumentaE12fromWireTypeES3_($27)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $29 = $13; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $$field = HEAP32[$29>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $$index1 = ((($29)) + 4|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ STACKTOP = STACKTOP + 112|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(112|0);
+ $28 = sp + 80|0;
+ $14 = $0;
+ $15 = $1;
+ $16 = $2;
+ $17 = $3;
+ $18 = $4;
+ $19 = $5;
+ $20 = $6;
+ $21 = $7;
+ $22 = $8;
+ $23 = $9;
+ $24 = $10;
+ $25 = $11;
+ $26 = $12;
+ $27 = $13;
+ $29 = $15; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $30 = (__ZN10emscripten8internal11BindingTypeIP10NstrumentaE12fromWireTypeES3_($29)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $31 = $14; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $$field = HEAP32[$31>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $$index1 = ((($31)) + 4|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$field2 = HEAP32[$$index1>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $30 = $$field2 >> 1; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $31 = (($28) + ($30)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $32 = $$field2 & 1; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $33 = ($32|0)!=(0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- if ($33) {
-  $34 = HEAP32[$31>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
-  $35 = (($34) + ($$field)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
-  $36 = HEAP32[$35>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
-  $60 = $36;
+ $32 = $$field2 >> 1; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $33 = (($30) + ($32)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $34 = $$field2 & 1; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $35 = ($34|0)!=(0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ if ($35) {
+  $36 = HEAP32[$33>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+  $37 = (($36) + ($$field)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+  $38 = HEAP32[$37>>2]|0; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+  $64 = $38;
  } else {
-  $37 = $$field; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
-  $60 = $37;
+  $39 = $$field; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+  $64 = $39;
  }
- $38 = $15; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $39 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($38)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $40 = $16; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $41 = (__ZN10emscripten8internal11BindingTypeIjE12fromWireTypeEj($40)|0); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $41 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($40)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $42 = $17; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $43 = (__ZN10emscripten8internal11BindingTypeIiE12fromWireTypeEi($42)|0); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $43 = (__ZN10emscripten8internal11BindingTypeIjE12fromWireTypeEj($42)|0); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $44 = $18; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $45 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($44)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $45 = (__ZN10emscripten8internal11BindingTypeIiE12fromWireTypeEi($44)|0); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $46 = $19; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $47 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($46)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $48 = $20; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
@@ -4523,35 +4599,39 @@ function __ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjiddddddddEiPS
  $57 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($56)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $58 = $25; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $59 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($58)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $61 = (FUNCTION_TABLE_iidiidddddddd[$60 & 63]($31,$39,$41,$43,$45,$47,$49,$51,$53,$55,$57,$59)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- HEAP32[$26>>2] = $61; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- $62 = (__ZN10emscripten8internal11BindingTypeIiE10toWireTypeERKi($26)|0); //@line 493 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
- STACKTOP = sp;return ($62|0); //@line 493 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $60 = $26; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $61 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($60)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $62 = $27; //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $63 = (+__ZN10emscripten8internal11BindingTypeIdE12fromWireTypeEd($62)); //@line 495 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $65 = (FUNCTION_TABLE_iidiiddddddddd[$64 & 63]($33,$41,$43,$45,$47,$49,$51,$53,$55,$57,$59,$61,$63)|0); //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ HEAP32[$28>>2] = $65; //@line 494 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $66 = (__ZN10emscripten8internal11BindingTypeIiE10toWireTypeERKi($28)|0); //@line 493 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ STACKTOP = sp;return ($66|0); //@line 493 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
-function __ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEE8getCountEv($0) {
+function __ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEE8getCountEv($0) {
  $0 = $0|0;
  var $1 = 0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- STACKTOP = sp;return 13; //@line 224 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ STACKTOP = sp;return 14; //@line 224 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
-function __ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEE8getTypesEv($0) {
+function __ZNK10emscripten8internal12WithPoliciesIJEE11ArgTypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEE8getTypesEv($0) {
  $0 = $0|0;
  var $1 = 0, $2 = 0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- $2 = (__ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEEEE3getEv()|0); //@line 228 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ $2 = (__ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEEEE3getEv()|0); //@line 228 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
  STACKTOP = sp;return ($2|0); //@line 228 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
-function __ZN10emscripten8internal10getContextIM10NstrumentaFidjiddddddddEEEPT_RKS5_($0) {
+function __ZN10emscripten8internal10getContextIM10NstrumentaFidjidddddddddEEEPT_RKS5_($0) {
  $0 = $0|0;
  var $$field = 0, $$field2 = 0, $$index1 = 0, $$index5 = 0, $1 = 0, $2 = 0, $3 = 0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
- $2 = (__Znwj(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ $2 = (__Znwm(8)|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $3 = $1; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$field = HEAP32[$3>>2]|0; //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
  $$index1 = ((($3)) + 4|0); //@line 558 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
@@ -4580,15 +4660,15 @@ function __ZN10emscripten8internal11BindingTypeIjE12fromWireTypeEj($0) {
  $2 = $1; //@line 258 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
  STACKTOP = sp;return ($2|0); //@line 258 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
-function __ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjiddddddddEEEE3getEv() {
+function __ZN10emscripten8internal14ArgArrayGetterINS0_8TypeListIJiNS0_17AllowedRawPointerI10NstrumentaEEdjidddddddddEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (492|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (32|0); //@line 208 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
-function __ZN10emscripten8internal19getGenericSignatureIJiiidiiddddddddEEEPKcv() {
+function __ZN10emscripten8internal19getGenericSignatureIJiiidiidddddddddEEEPKcv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (1187|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
+ return (96|0); //@line 389 "/emsdk_portable/sdk/system/include/emscripten/bind.h"
 }
 function __GLOBAL__sub_I_nstrumenta_cpp() {
  var label = 0, sp = 0;
@@ -4599,8 +4679,8 @@ function __GLOBAL__sub_I_nstrumenta_cpp() {
 function _algorithm_init() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- _imu_init(2912); //@line 6 "../../src/nst_main.c"
- return; //@line 7 "../../src/nst_main.c"
+ _imu_init(3968); //@line 6 "src/nst_main.c"
+ return; //@line 7 "src/nst_main.c"
 }
 function _algorithm_update($0,$1,$2) {
  $0 = $0|0;
@@ -4612,11 +4692,11 @@ function _algorithm_update($0,$1,$2) {
  $$byval_copy = sp;
  $3 = $1;
  $4 = $2;
- $5 = $3; //@line 11 "../../src/nst_main.c"
- $6 = $4; //@line 11 "../../src/nst_main.c"
- _memcpy(($$byval_copy|0),($0|0),144)|0; //@line 11 "../../src/nst_main.c"
- _imu_update(2912,$$byval_copy,$5,$6); //@line 11 "../../src/nst_main.c"
- STACKTOP = sp;return; //@line 12 "../../src/nst_main.c"
+ $5 = $3; //@line 11 "src/nst_main.c"
+ $6 = $4; //@line 11 "src/nst_main.c"
+ _memcpy(($$byval_copy|0),($0|0),144)|0; //@line 11 "src/nst_main.c"
+ _imu_update(3968,$$byval_copy,$5,$6); //@line 11 "src/nst_main.c"
+ STACKTOP = sp;return; //@line 12 "src/nst_main.c"
 }
 function _quaternion($0,$1,$2,$3,$4) {
  $0 = $0|0;
@@ -4632,270 +4712,95 @@ function _quaternion($0,$1,$2,$3,$4) {
  $6 = $2;
  $7 = $3;
  $8 = $4;
- $10 = $8; //@line 22 "../../src/quaternion/quaternion.c"
- HEAPF32[$9>>2] = $10; //@line 22 "../../src/quaternion/quaternion.c"
- $11 = ((($9)) + 4|0); //@line 22 "../../src/quaternion/quaternion.c"
- $12 = $5; //@line 22 "../../src/quaternion/quaternion.c"
- HEAPF32[$11>>2] = $12; //@line 22 "../../src/quaternion/quaternion.c"
- $13 = ((($9)) + 8|0); //@line 22 "../../src/quaternion/quaternion.c"
- $14 = $6; //@line 22 "../../src/quaternion/quaternion.c"
- HEAPF32[$13>>2] = $14; //@line 22 "../../src/quaternion/quaternion.c"
- $15 = ((($9)) + 12|0); //@line 22 "../../src/quaternion/quaternion.c"
- $16 = $7; //@line 22 "../../src/quaternion/quaternion.c"
- HEAPF32[$15>>2] = $16; //@line 22 "../../src/quaternion/quaternion.c"
- ;HEAP32[$0>>2]=HEAP32[$9>>2]|0;HEAP32[$0+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$9+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$9+12>>2]|0; //@line 23 "../../src/quaternion/quaternion.c"
- STACKTOP = sp;return; //@line 23 "../../src/quaternion/quaternion.c"
-}
-function _quaternion_log($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $10 = 0.0, $11 = 0, $12 = 0.0, $13 = 0.0, $14 = 0, $15 = 0.0, $16 = 0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $2 = 0.0, $20 = 0, $21 = 0.0, $22 = 0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0.0, $27 = 0.0, $28 = 0.0;
- var $29 = 0.0, $3 = 0, $30 = 0.0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0.0, $36 = 0, $37 = 0.0, $38 = 0.0, $39 = 0, $4 = 0, $40 = 0.0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0, $45 = 0.0, $46 = 0.0;
- var $47 = 0.0, $48 = 0.0, $49 = 0.0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0.0, $54 = 0.0, $55 = 0.0, $56 = 0.0, $57 = 0, $58 = 0, $59 = 0, $6 = 0.0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0.0, $64 = 0.0;
- var $65 = 0.0, $66 = 0.0, $67 = 0.0, $68 = 0.0, $69 = 0.0, $7 = 0.0, $70 = 0.0, $71 = 0.0, $72 = 0.0, $73 = 0.0, $74 = 0.0, $75 = 0.0, $76 = 0.0, $77 = 0.0, $78 = 0.0, $79 = 0.0, $8 = 0, $80 = 0, $81 = 0.0, $82 = 0;
- var $83 = 0.0, $84 = 0.0, $85 = 0, $86 = 0.0, $87 = 0, $88 = 0.0, $89 = 0.0, $9 = 0, $90 = 0, $91 = 0.0, $92 = 0, $93 = 0.0, $94 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 80|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(80|0);
- $3 = sp + 56|0;
- $4 = sp + 40|0;
- $5 = sp + 24|0;
- $8 = sp;
- $9 = ((($1)) + 4|0); //@line 72 "../../src/quaternion/quaternion.c"
- $10 = +HEAPF32[$9>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $11 = ((($1)) + 4|0); //@line 72 "../../src/quaternion/quaternion.c"
- $12 = +HEAPF32[$11>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $13 = $10 * $12; //@line 72 "../../src/quaternion/quaternion.c"
- $14 = ((($1)) + 8|0); //@line 72 "../../src/quaternion/quaternion.c"
- $15 = +HEAPF32[$14>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $16 = ((($1)) + 8|0); //@line 72 "../../src/quaternion/quaternion.c"
- $17 = +HEAPF32[$16>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $18 = $15 * $17; //@line 72 "../../src/quaternion/quaternion.c"
- $19 = $13 + $18; //@line 72 "../../src/quaternion/quaternion.c"
- $20 = ((($1)) + 12|0); //@line 72 "../../src/quaternion/quaternion.c"
- $21 = +HEAPF32[$20>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $22 = ((($1)) + 12|0); //@line 72 "../../src/quaternion/quaternion.c"
- $23 = +HEAPF32[$22>>2]; //@line 72 "../../src/quaternion/quaternion.c"
- $24 = $21 * $23; //@line 72 "../../src/quaternion/quaternion.c"
- $25 = $19 + $24; //@line 72 "../../src/quaternion/quaternion.c"
- $26 = $25; //@line 72 "../../src/quaternion/quaternion.c"
- $27 = (+Math_sqrt((+$26))); //@line 72 "../../src/quaternion/quaternion.c"
- $28 = $27; //@line 72 "../../src/quaternion/quaternion.c"
- $2 = $28; //@line 72 "../../src/quaternion/quaternion.c"
- $29 = $2; //@line 73 "../../src/quaternion/quaternion.c"
- $30 = $29; //@line 73 "../../src/quaternion/quaternion.c"
- $31 = (+Math_abs((+$30))); //@line 73 "../../src/quaternion/quaternion.c"
- $32 = +HEAPF32[$1>>2]; //@line 73 "../../src/quaternion/quaternion.c"
- $33 = $32; //@line 73 "../../src/quaternion/quaternion.c"
- $34 = (+Math_abs((+$33))); //@line 73 "../../src/quaternion/quaternion.c"
- $35 = 9.9999999999999999E-15 * $34; //@line 73 "../../src/quaternion/quaternion.c"
- $36 = $31 <= $35; //@line 73 "../../src/quaternion/quaternion.c"
- if (!($36)) {
-  $60 = $2; //@line 97 "../../src/quaternion/quaternion.c"
-  $61 = $60; //@line 97 "../../src/quaternion/quaternion.c"
-  $62 = +HEAPF32[$1>>2]; //@line 97 "../../src/quaternion/quaternion.c"
-  $63 = $62; //@line 97 "../../src/quaternion/quaternion.c"
-  $64 = (+Math_atan2((+$61),(+$63))); //@line 97 "../../src/quaternion/quaternion.c"
-  $65 = $64; //@line 97 "../../src/quaternion/quaternion.c"
-  $6 = $65; //@line 97 "../../src/quaternion/quaternion.c"
-  $66 = $6; //@line 98 "../../src/quaternion/quaternion.c"
-  $67 = $2; //@line 98 "../../src/quaternion/quaternion.c"
-  $68 = $66 / $67; //@line 98 "../../src/quaternion/quaternion.c"
-  $7 = $68; //@line 98 "../../src/quaternion/quaternion.c"
-  $69 = +HEAPF32[$1>>2]; //@line 99 "../../src/quaternion/quaternion.c"
-  $70 = +HEAPF32[$1>>2]; //@line 99 "../../src/quaternion/quaternion.c"
-  $71 = $69 * $70; //@line 99 "../../src/quaternion/quaternion.c"
-  $72 = $2; //@line 99 "../../src/quaternion/quaternion.c"
-  $73 = $2; //@line 99 "../../src/quaternion/quaternion.c"
-  $74 = $72 * $73; //@line 99 "../../src/quaternion/quaternion.c"
-  $75 = $71 + $74; //@line 99 "../../src/quaternion/quaternion.c"
-  $76 = $75; //@line 99 "../../src/quaternion/quaternion.c"
-  $77 = (+Math_log((+$76))); //@line 99 "../../src/quaternion/quaternion.c"
-  $78 = $77 / 2.0; //@line 99 "../../src/quaternion/quaternion.c"
-  $79 = $78; //@line 99 "../../src/quaternion/quaternion.c"
-  HEAPF32[$8>>2] = $79; //@line 99 "../../src/quaternion/quaternion.c"
-  $80 = ((($8)) + 4|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $81 = $7; //@line 99 "../../src/quaternion/quaternion.c"
-  $82 = ((($1)) + 4|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $83 = +HEAPF32[$82>>2]; //@line 99 "../../src/quaternion/quaternion.c"
-  $84 = $81 * $83; //@line 99 "../../src/quaternion/quaternion.c"
-  HEAPF32[$80>>2] = $84; //@line 99 "../../src/quaternion/quaternion.c"
-  $85 = ((($8)) + 8|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $86 = $7; //@line 99 "../../src/quaternion/quaternion.c"
-  $87 = ((($1)) + 8|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $88 = +HEAPF32[$87>>2]; //@line 99 "../../src/quaternion/quaternion.c"
-  $89 = $86 * $88; //@line 99 "../../src/quaternion/quaternion.c"
-  HEAPF32[$85>>2] = $89; //@line 99 "../../src/quaternion/quaternion.c"
-  $90 = ((($8)) + 12|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $91 = $7; //@line 99 "../../src/quaternion/quaternion.c"
-  $92 = ((($1)) + 12|0); //@line 99 "../../src/quaternion/quaternion.c"
-  $93 = +HEAPF32[$92>>2]; //@line 99 "../../src/quaternion/quaternion.c"
-  $94 = $91 * $93; //@line 99 "../../src/quaternion/quaternion.c"
-  HEAPF32[$90>>2] = $94; //@line 99 "../../src/quaternion/quaternion.c"
-  ;HEAP32[$0>>2]=HEAP32[$8>>2]|0;HEAP32[$0+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$8+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$8+12>>2]|0; //@line 100 "../../src/quaternion/quaternion.c"
-  STACKTOP = sp;return; //@line 102 "../../src/quaternion/quaternion.c"
- }
- $37 = +HEAPF32[$1>>2]; //@line 75 "../../src/quaternion/quaternion.c"
- $38 = $37; //@line 75 "../../src/quaternion/quaternion.c"
- $39 = $38 < 0.0; //@line 75 "../../src/quaternion/quaternion.c"
- if (!($39)) {
-  $53 = +HEAPF32[$1>>2]; //@line 91 "../../src/quaternion/quaternion.c"
-  $54 = $53; //@line 91 "../../src/quaternion/quaternion.c"
-  $55 = (+Math_log((+$54))); //@line 91 "../../src/quaternion/quaternion.c"
-  $56 = $55; //@line 91 "../../src/quaternion/quaternion.c"
-  HEAPF32[$5>>2] = $56; //@line 91 "../../src/quaternion/quaternion.c"
-  $57 = ((($5)) + 4|0); //@line 91 "../../src/quaternion/quaternion.c"
-  HEAPF32[$57>>2] = 0.0; //@line 91 "../../src/quaternion/quaternion.c"
-  $58 = ((($5)) + 8|0); //@line 91 "../../src/quaternion/quaternion.c"
-  HEAPF32[$58>>2] = 0.0; //@line 91 "../../src/quaternion/quaternion.c"
-  $59 = ((($5)) + 12|0); //@line 91 "../../src/quaternion/quaternion.c"
-  HEAPF32[$59>>2] = 0.0; //@line 91 "../../src/quaternion/quaternion.c"
-  ;HEAP32[$0>>2]=HEAP32[$5>>2]|0;HEAP32[$0+4>>2]=HEAP32[$5+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$5+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$5+12>>2]|0; //@line 92 "../../src/quaternion/quaternion.c"
-  STACKTOP = sp;return; //@line 102 "../../src/quaternion/quaternion.c"
- }
- $40 = +HEAPF32[$1>>2]; //@line 78 "../../src/quaternion/quaternion.c"
- $41 = $40 + 1.0; //@line 78 "../../src/quaternion/quaternion.c"
- $42 = $41; //@line 78 "../../src/quaternion/quaternion.c"
- $43 = (+Math_abs((+$42))); //@line 78 "../../src/quaternion/quaternion.c"
- $44 = $43 > 9.9999999999999999E-15; //@line 78 "../../src/quaternion/quaternion.c"
- if ($44) {
-  $45 = +HEAPF32[$1>>2]; //@line 80 "../../src/quaternion/quaternion.c"
-  $46 = - $45; //@line 80 "../../src/quaternion/quaternion.c"
-  $47 = $46; //@line 80 "../../src/quaternion/quaternion.c"
-  $48 = (+Math_log((+$47))); //@line 80 "../../src/quaternion/quaternion.c"
-  $49 = $48; //@line 80 "../../src/quaternion/quaternion.c"
-  HEAPF32[$3>>2] = $49; //@line 80 "../../src/quaternion/quaternion.c"
-  $50 = ((($3)) + 4|0); //@line 80 "../../src/quaternion/quaternion.c"
-  HEAPF32[$50>>2] = 3.1415927410125732; //@line 80 "../../src/quaternion/quaternion.c"
-  $51 = ((($3)) + 8|0); //@line 80 "../../src/quaternion/quaternion.c"
-  HEAPF32[$51>>2] = 0.0; //@line 80 "../../src/quaternion/quaternion.c"
-  $52 = ((($3)) + 12|0); //@line 80 "../../src/quaternion/quaternion.c"
-  HEAPF32[$52>>2] = 0.0; //@line 80 "../../src/quaternion/quaternion.c"
-  ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$3+12>>2]|0; //@line 81 "../../src/quaternion/quaternion.c"
-  STACKTOP = sp;return; //@line 102 "../../src/quaternion/quaternion.c"
- } else {
-  ;HEAP32[$4>>2]=HEAP32[544>>2]|0;HEAP32[$4+4>>2]=HEAP32[544+4>>2]|0;HEAP32[$4+8>>2]=HEAP32[544+8>>2]|0;HEAP32[$4+12>>2]=HEAP32[544+12>>2]|0; //@line 85 "../../src/quaternion/quaternion.c"
-  ;HEAP32[$0>>2]=HEAP32[$4>>2]|0;HEAP32[$0+4>>2]=HEAP32[$4+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$4+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$4+12>>2]|0; //@line 86 "../../src/quaternion/quaternion.c"
-  STACKTOP = sp;return; //@line 102 "../../src/quaternion/quaternion.c"
- }
+ $10 = $8; //@line 22 "src/quaternion/quaternion.c"
+ HEAPF32[$9>>2] = $10; //@line 22 "src/quaternion/quaternion.c"
+ $11 = ((($9)) + 4|0); //@line 22 "src/quaternion/quaternion.c"
+ $12 = $5; //@line 22 "src/quaternion/quaternion.c"
+ HEAPF32[$11>>2] = $12; //@line 22 "src/quaternion/quaternion.c"
+ $13 = ((($9)) + 8|0); //@line 22 "src/quaternion/quaternion.c"
+ $14 = $6; //@line 22 "src/quaternion/quaternion.c"
+ HEAPF32[$13>>2] = $14; //@line 22 "src/quaternion/quaternion.c"
+ $15 = ((($9)) + 12|0); //@line 22 "src/quaternion/quaternion.c"
+ $16 = $7; //@line 22 "src/quaternion/quaternion.c"
+ HEAPF32[$15>>2] = $16; //@line 22 "src/quaternion/quaternion.c"
+ ;HEAP32[$0>>2]=HEAP32[$9>>2]|0;HEAP32[$0+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$9+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$9+12>>2]|0; //@line 23 "src/quaternion/quaternion.c"
+ STACKTOP = sp;return; //@line 23 "src/quaternion/quaternion.c"
 }
 function _imu_init($0) {
  $0 = $0|0;
  var $1 = 0, $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $2 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0;
- var $28 = 0, $29 = 0, $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0;
- var $46 = 0, $47 = 0, $48 = 0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0;
- var $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
+ var $28 = 0, $29 = 0, $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $5 = 0, $6 = 0, $7 = 0;
+ var $8 = 0, $9 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- STACKTOP = STACKTOP + 192|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(192|0);
- $2 = sp + 176|0;
- $3 = sp + 160|0;
- $4 = sp + 144|0;
- $5 = sp + 128|0;
- $6 = sp + 112|0;
- $7 = sp + 96|0;
- $8 = sp + 84|0;
- $9 = sp + 72|0;
- $10 = sp + 60|0;
- $11 = sp + 48|0;
- $12 = sp + 36|0;
- $13 = sp + 24|0;
- $14 = sp + 12|0;
- $15 = sp;
+ STACKTOP = STACKTOP + 144|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(144|0);
+ $2 = sp + 128|0;
+ $3 = sp + 116|0;
+ $4 = sp + 104|0;
+ $5 = sp + 92|0;
+ $6 = sp + 80|0;
+ $7 = sp + 68|0;
+ $8 = sp + 56|0;
+ $9 = sp + 44|0;
+ $10 = sp + 32|0;
+ $11 = sp + 16|0;
+ $12 = sp;
  $1 = $0;
- $16 = $1; //@line 11 "../../src/imu/imu.c"
- $17 = ((($16)) + 1168|0); //@line 11 "../../src/imu/imu.c"
- HEAPF64[$17>>3] = 0.0; //@line 11 "../../src/imu/imu.c"
- $18 = $1; //@line 12 "../../src/imu/imu.c"
- $19 = ((($18)) + 1184|0); //@line 12 "../../src/imu/imu.c"
- HEAPF64[$19>>3] = 0.0; //@line 12 "../../src/imu/imu.c"
- $20 = $1; //@line 14 "../../src/imu/imu.c"
- HEAP32[$20>>2] = 0; //@line 14 "../../src/imu/imu.c"
- $21 = $1; //@line 16 "../../src/imu/imu.c"
- $22 = ((($21)) + 8|0); //@line 16 "../../src/imu/imu.c"
- HEAPF64[$22>>3] = 0.0; //@line 16 "../../src/imu/imu.c"
- $23 = $1; //@line 17 "../../src/imu/imu.c"
- $24 = ((($23)) + 16|0); //@line 17 "../../src/imu/imu.c"
- _vec3_10($2,0.0,0.0,0.0); //@line 17 "../../src/imu/imu.c"
- ;HEAP32[$24>>2]=HEAP32[$2>>2]|0;HEAP32[$24+4>>2]=HEAP32[$2+4>>2]|0;HEAP32[$24+8>>2]=HEAP32[$2+8>>2]|0; //@line 17 "../../src/imu/imu.c"
- $25 = $1; //@line 19 "../../src/imu/imu.c"
- $26 = ((($25)) + 1312|0); //@line 19 "../../src/imu/imu.c"
- $27 = ((($26)) + 24|0); //@line 19 "../../src/imu/imu.c"
- _quaternion($3,0.0,0.0,0.0,1.0); //@line 19 "../../src/imu/imu.c"
- ;HEAP32[$27>>2]=HEAP32[$3>>2]|0;HEAP32[$27+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$27+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$27+12>>2]=HEAP32[$3+12>>2]|0; //@line 19 "../../src/imu/imu.c"
- $28 = $1; //@line 20 "../../src/imu/imu.c"
- $29 = ((($28)) + 1312|0); //@line 20 "../../src/imu/imu.c"
- $30 = ((($29)) + 40|0); //@line 20 "../../src/imu/imu.c"
- _vec3_10($4,0.0,0.0,0.0); //@line 20 "../../src/imu/imu.c"
- ;HEAP32[$30>>2]=HEAP32[$4>>2]|0;HEAP32[$30+4>>2]=HEAP32[$4+4>>2]|0;HEAP32[$30+8>>2]=HEAP32[$4+8>>2]|0; //@line 20 "../../src/imu/imu.c"
- $31 = $1; //@line 21 "../../src/imu/imu.c"
- $32 = ((($31)) + 1312|0); //@line 21 "../../src/imu/imu.c"
- $33 = ((($32)) + 56|0); //@line 21 "../../src/imu/imu.c"
- HEAPF64[$33>>3] = 0.0; //@line 21 "../../src/imu/imu.c"
- $34 = $1; //@line 23 "../../src/imu/imu.c"
- $35 = ((($34)) + 1376|0); //@line 23 "../../src/imu/imu.c"
- $36 = ((($35)) + 24|0); //@line 23 "../../src/imu/imu.c"
- _quaternion($5,0.0,0.0,0.0,1.0); //@line 23 "../../src/imu/imu.c"
- ;HEAP32[$36>>2]=HEAP32[$5>>2]|0;HEAP32[$36+4>>2]=HEAP32[$5+4>>2]|0;HEAP32[$36+8>>2]=HEAP32[$5+8>>2]|0;HEAP32[$36+12>>2]=HEAP32[$5+12>>2]|0; //@line 23 "../../src/imu/imu.c"
- $37 = $1; //@line 24 "../../src/imu/imu.c"
- $38 = ((($37)) + 1376|0); //@line 24 "../../src/imu/imu.c"
- $39 = ((($38)) + 40|0); //@line 24 "../../src/imu/imu.c"
- _vec3_10($6,0.0,0.0,0.0); //@line 24 "../../src/imu/imu.c"
- ;HEAP32[$39>>2]=HEAP32[$6>>2]|0;HEAP32[$39+4>>2]=HEAP32[$6+4>>2]|0;HEAP32[$39+8>>2]=HEAP32[$6+8>>2]|0; //@line 24 "../../src/imu/imu.c"
- $40 = $1; //@line 25 "../../src/imu/imu.c"
- $41 = ((($40)) + 1376|0); //@line 25 "../../src/imu/imu.c"
- $42 = ((($41)) + 56|0); //@line 25 "../../src/imu/imu.c"
- HEAPF64[$42>>3] = 0.0; //@line 25 "../../src/imu/imu.c"
- $43 = $1; //@line 27 "../../src/imu/imu.c"
- $44 = ((($43)) + 1440|0); //@line 27 "../../src/imu/imu.c"
- $45 = ((($44)) + 24|0); //@line 27 "../../src/imu/imu.c"
- _quaternion($7,0.0,0.0,0.0,1.0); //@line 27 "../../src/imu/imu.c"
- ;HEAP32[$45>>2]=HEAP32[$7>>2]|0;HEAP32[$45+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$45+8>>2]=HEAP32[$7+8>>2]|0;HEAP32[$45+12>>2]=HEAP32[$7+12>>2]|0; //@line 27 "../../src/imu/imu.c"
- $46 = $1; //@line 28 "../../src/imu/imu.c"
- $47 = ((($46)) + 1440|0); //@line 28 "../../src/imu/imu.c"
- $48 = ((($47)) + 40|0); //@line 28 "../../src/imu/imu.c"
- _vec3_10($8,0.0,0.0,0.0); //@line 28 "../../src/imu/imu.c"
- ;HEAP32[$48>>2]=HEAP32[$8>>2]|0;HEAP32[$48+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$48+8>>2]=HEAP32[$8+8>>2]|0; //@line 28 "../../src/imu/imu.c"
- $49 = $1; //@line 29 "../../src/imu/imu.c"
- $50 = ((($49)) + 1440|0); //@line 29 "../../src/imu/imu.c"
- $51 = ((($50)) + 56|0); //@line 29 "../../src/imu/imu.c"
- HEAPF64[$51>>3] = 0.0; //@line 29 "../../src/imu/imu.c"
- $52 = $1; //@line 31 "../../src/imu/imu.c"
- $53 = ((($52)) + 40|0); //@line 31 "../../src/imu/imu.c"
- _vec3_10($9,0.0,0.0,1.0); //@line 31 "../../src/imu/imu.c"
- ;HEAP32[$53>>2]=HEAP32[$9>>2]|0;HEAP32[$53+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$53+8>>2]=HEAP32[$9+8>>2]|0; //@line 31 "../../src/imu/imu.c"
- $54 = $1; //@line 33 "../../src/imu/imu.c"
- $55 = ((($54)) + 1232|0); //@line 33 "../../src/imu/imu.c"
- HEAPF64[$55>>3] = 0.0; //@line 33 "../../src/imu/imu.c"
- $56 = $1; //@line 34 "../../src/imu/imu.c"
- $57 = ((($56)) + 1192|0); //@line 34 "../../src/imu/imu.c"
- _vec3_10($10,0.0,0.0,0.0); //@line 34 "../../src/imu/imu.c"
- ;HEAP32[$57>>2]=HEAP32[$10>>2]|0;HEAP32[$57+4>>2]=HEAP32[$10+4>>2]|0;HEAP32[$57+8>>2]=HEAP32[$10+8>>2]|0; //@line 34 "../../src/imu/imu.c"
- $58 = $1; //@line 35 "../../src/imu/imu.c"
- $59 = ((($58)) + 1204|0); //@line 35 "../../src/imu/imu.c"
- _vec3_10($11,1.0,1.0,1.0); //@line 35 "../../src/imu/imu.c"
- ;HEAP32[$59>>2]=HEAP32[$11>>2]|0;HEAP32[$59+4>>2]=HEAP32[$11+4>>2]|0;HEAP32[$59+8>>2]=HEAP32[$11+8>>2]|0; //@line 35 "../../src/imu/imu.c"
- $60 = $1; //@line 36 "../../src/imu/imu.c"
- $61 = ((($60)) + 1216|0); //@line 36 "../../src/imu/imu.c"
- _vec3_10($12,0.0,0.0,0.0); //@line 36 "../../src/imu/imu.c"
- ;HEAP32[$61>>2]=HEAP32[$12>>2]|0;HEAP32[$61+4>>2]=HEAP32[$12+4>>2]|0;HEAP32[$61+8>>2]=HEAP32[$12+8>>2]|0; //@line 36 "../../src/imu/imu.c"
- $62 = $1; //@line 38 "../../src/imu/imu.c"
- $63 = ((($62)) + 1240|0); //@line 38 "../../src/imu/imu.c"
- _vec3_10($13,0.0,0.0,0.0); //@line 38 "../../src/imu/imu.c"
- ;HEAP32[$63>>2]=HEAP32[$13>>2]|0;HEAP32[$63+4>>2]=HEAP32[$13+4>>2]|0;HEAP32[$63+8>>2]=HEAP32[$13+8>>2]|0; //@line 38 "../../src/imu/imu.c"
- $64 = $1; //@line 39 "../../src/imu/imu.c"
- $65 = ((($64)) + 1252|0); //@line 39 "../../src/imu/imu.c"
- _vec3_10($14,1.0,1.0,1.0); //@line 39 "../../src/imu/imu.c"
- ;HEAP32[$65>>2]=HEAP32[$14>>2]|0;HEAP32[$65+4>>2]=HEAP32[$14+4>>2]|0;HEAP32[$65+8>>2]=HEAP32[$14+8>>2]|0; //@line 39 "../../src/imu/imu.c"
- $66 = $1; //@line 40 "../../src/imu/imu.c"
- $67 = ((($66)) + 1264|0); //@line 40 "../../src/imu/imu.c"
- _vec3_10($15,0.0,0.0,0.0); //@line 40 "../../src/imu/imu.c"
- ;HEAP32[$67>>2]=HEAP32[$15>>2]|0;HEAP32[$67+4>>2]=HEAP32[$15+4>>2]|0;HEAP32[$67+8>>2]=HEAP32[$15+8>>2]|0; //@line 40 "../../src/imu/imu.c"
- $68 = $1; //@line 41 "../../src/imu/imu.c"
- $69 = ((($68)) + 32|0); //@line 41 "../../src/imu/imu.c"
- HEAPF64[$69>>3] = 0.0012199999999999999; //@line 41 "../../src/imu/imu.c"
- $70 = $1; //@line 43 "../../src/imu/imu.c"
- $71 = ((($70)) + 1504|0); //@line 43 "../../src/imu/imu.c"
- HEAPF64[$71>>3] = 0.0; //@line 43 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 44 "../../src/imu/imu.c"
+ $13 = $1; //@line 11 "src/imu/imu.c"
+ $14 = ((($13)) + 8|0); //@line 11 "src/imu/imu.c"
+ HEAPF32[$14>>2] = 0.0099999997764825821; //@line 11 "src/imu/imu.c"
+ $15 = $1; //@line 13 "src/imu/imu.c"
+ $16 = ((($15)) + 12|0); //@line 13 "src/imu/imu.c"
+ HEAPF32[$16>>2] = 0.0099999997764825821; //@line 13 "src/imu/imu.c"
+ $17 = $1; //@line 15 "src/imu/imu.c"
+ $18 = ((($17)) + 56|0); //@line 15 "src/imu/imu.c"
+ _vec3_10($2,0.0,0.0,0.0); //@line 15 "src/imu/imu.c"
+ ;HEAP32[$18>>2]=HEAP32[$2>>2]|0;HEAP32[$18+4>>2]=HEAP32[$2+4>>2]|0;HEAP32[$18+8>>2]=HEAP32[$2+8>>2]|0; //@line 15 "src/imu/imu.c"
+ $19 = $1; //@line 16 "src/imu/imu.c"
+ $20 = ((($19)) + 68|0); //@line 16 "src/imu/imu.c"
+ _vec3_10($3,0.0,0.0,0.0); //@line 16 "src/imu/imu.c"
+ ;HEAP32[$20>>2]=HEAP32[$3>>2]|0;HEAP32[$20+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$20+8>>2]=HEAP32[$3+8>>2]|0; //@line 16 "src/imu/imu.c"
+ $21 = $1; //@line 17 "src/imu/imu.c"
+ $22 = ((($21)) + 80|0); //@line 17 "src/imu/imu.c"
+ _vec3_10($4,1.0,1.0,1.0); //@line 17 "src/imu/imu.c"
+ ;HEAP32[$22>>2]=HEAP32[$4>>2]|0;HEAP32[$22+4>>2]=HEAP32[$4+4>>2]|0;HEAP32[$22+8>>2]=HEAP32[$4+8>>2]|0; //@line 17 "src/imu/imu.c"
+ $23 = $1; //@line 19 "src/imu/imu.c"
+ $24 = ((($23)) + 16|0); //@line 19 "src/imu/imu.c"
+ _vec3_10($5,0.0,0.0,0.0); //@line 19 "src/imu/imu.c"
+ ;HEAP32[$24>>2]=HEAP32[$5>>2]|0;HEAP32[$24+4>>2]=HEAP32[$5+4>>2]|0;HEAP32[$24+8>>2]=HEAP32[$5+8>>2]|0; //@line 19 "src/imu/imu.c"
+ $25 = $1; //@line 20 "src/imu/imu.c"
+ $26 = ((($25)) + 28|0); //@line 20 "src/imu/imu.c"
+ _vec3_10($6,0.0,0.0,0.0); //@line 20 "src/imu/imu.c"
+ ;HEAP32[$26>>2]=HEAP32[$6>>2]|0;HEAP32[$26+4>>2]=HEAP32[$6+4>>2]|0;HEAP32[$26+8>>2]=HEAP32[$6+8>>2]|0; //@line 20 "src/imu/imu.c"
+ $27 = $1; //@line 21 "src/imu/imu.c"
+ $28 = ((($27)) + 40|0); //@line 21 "src/imu/imu.c"
+ _vec3_10($7,1.0,1.0,1.0); //@line 21 "src/imu/imu.c"
+ ;HEAP32[$28>>2]=HEAP32[$7>>2]|0;HEAP32[$28+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$28+8>>2]=HEAP32[$7+8>>2]|0; //@line 21 "src/imu/imu.c"
+ $29 = $1; //@line 23 "src/imu/imu.c"
+ $30 = ((($29)) + 92|0); //@line 23 "src/imu/imu.c"
+ _vec3_10($8,0.0,0.0,0.0); //@line 23 "src/imu/imu.c"
+ ;HEAP32[$30>>2]=HEAP32[$8>>2]|0;HEAP32[$30+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$30+8>>2]=HEAP32[$8+8>>2]|0; //@line 23 "src/imu/imu.c"
+ $31 = $1; //@line 24 "src/imu/imu.c"
+ $32 = ((($31)) + 104|0); //@line 24 "src/imu/imu.c"
+ _vec3_10($9,0.0,0.0,0.0); //@line 24 "src/imu/imu.c"
+ ;HEAP32[$32>>2]=HEAP32[$9>>2]|0;HEAP32[$32+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$32+8>>2]=HEAP32[$9+8>>2]|0; //@line 24 "src/imu/imu.c"
+ $33 = $1; //@line 25 "src/imu/imu.c"
+ $34 = ((($33)) + 116|0); //@line 25 "src/imu/imu.c"
+ _vec3_10($10,1.0,1.0,1.0); //@line 25 "src/imu/imu.c"
+ ;HEAP32[$34>>2]=HEAP32[$10>>2]|0;HEAP32[$34+4>>2]=HEAP32[$10+4>>2]|0;HEAP32[$34+8>>2]=HEAP32[$10+8>>2]|0; //@line 25 "src/imu/imu.c"
+ $35 = $1; //@line 27 "src/imu/imu.c"
+ $36 = ((($35)) + 128|0); //@line 27 "src/imu/imu.c"
+ _quaternion($11,0.0,0.0,0.0,1.0); //@line 27 "src/imu/imu.c"
+ ;HEAP32[$36>>2]=HEAP32[$11>>2]|0;HEAP32[$36+4>>2]=HEAP32[$11+4>>2]|0;HEAP32[$36+8>>2]=HEAP32[$11+8>>2]|0;HEAP32[$36+12>>2]=HEAP32[$11+12>>2]|0; //@line 27 "src/imu/imu.c"
+ $37 = $1; //@line 28 "src/imu/imu.c"
+ $38 = ((($37)) + 128|0); //@line 28 "src/imu/imu.c"
+ $39 = ((($38)) + 16|0); //@line 28 "src/imu/imu.c"
+ _vec3_10($12,0.0,0.0,0.0); //@line 28 "src/imu/imu.c"
+ ;HEAP32[$39>>2]=HEAP32[$12>>2]|0;HEAP32[$39+4>>2]=HEAP32[$12+4>>2]|0;HEAP32[$39+8>>2]=HEAP32[$12+8>>2]|0; //@line 28 "src/imu/imu.c"
+ $40 = $1; //@line 29 "src/imu/imu.c"
+ $41 = ((($40)) + 128|0); //@line 29 "src/imu/imu.c"
+ $42 = ((($41)) + 32|0); //@line 29 "src/imu/imu.c"
+ HEAPF64[$42>>3] = 0.0; //@line 29 "src/imu/imu.c"
+ STACKTOP = sp;return; //@line 30 "src/imu/imu.c"
 }
 function _vec3_10($0,$1,$2,$3) {
  $0 = $0|0;
@@ -4908,157 +4813,61 @@ function _vec3_10($0,$1,$2,$3) {
  $4 = $1;
  $5 = $2;
  $6 = $3;
- $7 = $4; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$0>>2] = $7; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = ((($0)) + 4|0); //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = $5; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$8>>2] = $9; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = ((($0)) + 8|0); //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = $6; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$10>>2] = $11; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
- STACKTOP = sp;return; //@line 100 "../../src/imu/../quaternion/../math3d/math_3d.h"
+ $7 = $4; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$0>>2] = $7; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ $8 = ((($0)) + 4|0); //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ $9 = $5; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$8>>2] = $9; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ $10 = ((($0)) + 8|0); //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ $11 = $6; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$10>>2] = $11; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
+ STACKTOP = sp;return; //@line 100 "src/imu/../quaternion/../math3d/math_3d.h"
 }
-function _propogate_gyro($0,$1,$2) {
+function _imu_update_accelerometer($0,$1,$2,$3) {
  $0 = $0|0;
  $1 = $1|0;
- $2 = +$2;
- var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy10 = 0, $$byval_copy11 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $$byval_copy4 = 0, $$byval_copy5 = 0, $$byval_copy6 = 0, $$byval_copy7 = 0, $$byval_copy8 = 0, $$byval_copy9 = 0, $10 = 0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0, $17 = 0;
- var $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0.0, $23 = 0, $24 = 0.0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0.0, $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0;
- var $37 = 0, $38 = 0, $39 = 0.0, $4 = 0, $40 = 0.0, $41 = 0, $42 = 0, $43 = 0.0, $44 = 0, $45 = 0, $46 = 0.0, $47 = 0.0, $48 = 0.0, $49 = 0.0, $5 = 0.0, $50 = 0.0, $51 = 0, $52 = 0, $53 = 0.0, $54 = 0.0;
- var $55 = 0, $56 = 0.0, $57 = 0.0, $58 = 0.0, $59 = 0.0, $6 = 0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0.0, $64 = 0.0, $65 = 0.0, $66 = 0.0, $67 = 0.0, $68 = 0.0, $69 = 0.0, $7 = 0, $70 = 0.0, $71 = 0.0, $72 = 0.0;
- var $73 = 0, $74 = 0.0, $75 = 0.0, $76 = 0, $77 = 0.0, $78 = 0.0, $79 = 0.0, $8 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $9 = 0, label = 0, sp = 0;
+ $2 = $2|0;
+ $3 = $3|0;
+ var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0.0, $17 = 0, $18 = 0, $19 = 0.0, $20 = 0.0, $21 = 0, $22 = 0, $23 = 0.0, $24 = 0.0, $25 = 0;
+ var $26 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- STACKTOP = STACKTOP + 336|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(336|0);
- $$byval_copy11 = sp + 312|0;
- $$byval_copy10 = sp + 296|0;
- $$byval_copy9 = sp + 280|0;
- $$byval_copy8 = sp + 268|0;
- $$byval_copy7 = sp + 256|0;
- $$byval_copy6 = sp + 240|0;
- $$byval_copy5 = sp + 228|0;
- $$byval_copy4 = sp + 216|0;
- $$byval_copy3 = sp + 204|0;
- $$byval_copy2 = sp + 192|0;
- $$byval_copy1 = sp + 180|0;
- $$byval_copy = sp + 168|0;
- $6 = sp + 148|0;
- $7 = sp + 136|0;
- $8 = sp + 124|0;
- $9 = sp + 112|0;
- $10 = sp + 96|0;
- $16 = sp + 56|0;
- $17 = sp + 40|0;
- $18 = sp + 24|0;
- $19 = sp + 8|0;
- $3 = $0;
- $4 = $1;
+ STACKTOP = STACKTOP + 96|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(96|0);
+ $$byval_copy3 = sp + 84|0;
+ $$byval_copy2 = sp + 72|0;
+ $$byval_copy1 = sp + 60|0;
+ $$byval_copy = sp + 48|0;
+ $7 = sp + 24|0;
+ $8 = sp + 12|0;
+ $9 = sp;
+ $4 = $0;
  $5 = $2;
- $20 = $4; //@line 48 "../../src/imu/imu.c"
- $21 = ((($20)) + 56|0); //@line 48 "../../src/imu/imu.c"
- $22 = +HEAPF64[$21>>3]; //@line 48 "../../src/imu/imu.c"
- $23 = $22 == 0.0; //@line 48 "../../src/imu/imu.c"
- if ($23) {
-  $24 = $5; //@line 50 "../../src/imu/imu.c"
-  $25 = $4; //@line 50 "../../src/imu/imu.c"
-  $26 = ((($25)) + 56|0); //@line 50 "../../src/imu/imu.c"
-  HEAPF64[$26>>3] = $24; //@line 50 "../../src/imu/imu.c"
-  STACKTOP = sp;return; //@line 81 "../../src/imu/imu.c"
- }
- $27 = $3; //@line 54 "../../src/imu/imu.c"
- $28 = ((($27)) + 8|0); //@line 54 "../../src/imu/imu.c"
- $29 = +HEAPF64[$28>>3]; //@line 54 "../../src/imu/imu.c"
- $30 = $29 != 0.0; //@line 54 "../../src/imu/imu.c"
- if (!($30)) {
-  STACKTOP = sp;return; //@line 81 "../../src/imu/imu.c"
- }
- $31 = $3; //@line 56 "../../src/imu/imu.c"
- $32 = ((($31)) + 1252|0); //@line 56 "../../src/imu/imu.c"
- $33 = $3; //@line 56 "../../src/imu/imu.c"
- $34 = ((($33)) + 16|0); //@line 56 "../../src/imu/imu.c"
- $35 = $3; //@line 56 "../../src/imu/imu.c"
- $36 = ((($35)) + 1240|0); //@line 56 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy>>2]=HEAP32[$34>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$34+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$34+8>>2]|0; //@line 56 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$36>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$36+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$36+8>>2]|0; //@line 56 "../../src/imu/imu.c"
- _v3_sub_11($7,$$byval_copy,$$byval_copy1); //@line 56 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy2>>2]=HEAP32[$32>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$32+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$32+8>>2]|0; //@line 56 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy3>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$7+8>>2]|0; //@line 56 "../../src/imu/imu.c"
- _v3_mul($6,$$byval_copy2,$$byval_copy3); //@line 56 "../../src/imu/imu.c"
- $37 = $3; //@line 57 "../../src/imu/imu.c"
- $38 = ((($37)) + 32|0); //@line 57 "../../src/imu/imu.c"
- $39 = +HEAPF64[$38>>3]; //@line 57 "../../src/imu/imu.c"
- $40 = $39; //@line 57 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy4>>2]=HEAP32[$6>>2]|0;HEAP32[$$byval_copy4+4>>2]=HEAP32[$6+4>>2]|0;HEAP32[$$byval_copy4+8>>2]=HEAP32[$6+8>>2]|0; //@line 57 "../../src/imu/imu.c"
- _v3_muls_12($8,$$byval_copy4,$40); //@line 57 "../../src/imu/imu.c"
- $41 = $3; //@line 59 "../../src/imu/imu.c"
- $42 = ((($41)) + 1264|0); //@line 59 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy5>>2]=HEAP32[$42>>2]|0;HEAP32[$$byval_copy5+4>>2]=HEAP32[$42+4>>2]|0;HEAP32[$$byval_copy5+8>>2]=HEAP32[$42+8>>2]|0; //@line 59 "../../src/imu/imu.c"
- _quaternion_from_hpr($10,$$byval_copy5); //@line 59 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy6>>2]=HEAP32[$10>>2]|0;HEAP32[$$byval_copy6+4>>2]=HEAP32[$10+4>>2]|0;HEAP32[$$byval_copy6+8>>2]=HEAP32[$10+8>>2]|0;HEAP32[$$byval_copy6+12>>2]=HEAP32[$10+12>>2]|0; //@line 59 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy7>>2]=HEAP32[$8>>2]|0;HEAP32[$$byval_copy7+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$$byval_copy7+8>>2]=HEAP32[$8+8>>2]|0; //@line 59 "../../src/imu/imu.c"
- _quaternion_rotate_vec3($$byval_copy6,$$byval_copy7,$9); //@line 59 "../../src/imu/imu.c"
- $43 = $5; //@line 61 "../../src/imu/imu.c"
- $44 = $4; //@line 61 "../../src/imu/imu.c"
- $45 = ((($44)) + 56|0); //@line 61 "../../src/imu/imu.c"
- $46 = +HEAPF64[$45>>3]; //@line 61 "../../src/imu/imu.c"
- $47 = $43 - $46; //@line 61 "../../src/imu/imu.c"
- $48 = 0.001 * $47; //@line 61 "../../src/imu/imu.c"
- $49 = $48; //@line 61 "../../src/imu/imu.c"
- $11 = $49; //@line 61 "../../src/imu/imu.c"
- $50 = $5; //@line 62 "../../src/imu/imu.c"
- $51 = $4; //@line 62 "../../src/imu/imu.c"
- $52 = ((($51)) + 56|0); //@line 62 "../../src/imu/imu.c"
- HEAPF64[$52>>3] = $50; //@line 62 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy8>>2]=HEAP32[$9>>2]|0;HEAP32[$$byval_copy8+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$$byval_copy8+8>>2]=HEAP32[$9+8>>2]|0; //@line 64 "../../src/imu/imu.c"
- $53 = (+_v3_length_13($$byval_copy8)); //@line 64 "../../src/imu/imu.c"
- $12 = $53; //@line 64 "../../src/imu/imu.c"
- $13 = 0.0; //@line 65 "../../src/imu/imu.c"
- $14 = 0.0; //@line 65 "../../src/imu/imu.c"
- $15 = 1.0; //@line 65 "../../src/imu/imu.c"
- _quaternion($16,0.0,0.0,0.0,1.0); //@line 66 "../../src/imu/imu.c"
- $54 = $12; //@line 67 "../../src/imu/imu.c"
- $55 = $54 > 0.0; //@line 67 "../../src/imu/imu.c"
- if ($55) {
-  $56 = $12; //@line 69 "../../src/imu/imu.c"
-  $57 = $11; //@line 69 "../../src/imu/imu.c"
-  $58 = $56 * $57; //@line 69 "../../src/imu/imu.c"
-  $13 = $58; //@line 69 "../../src/imu/imu.c"
-  $59 = $13; //@line 70 "../../src/imu/imu.c"
-  $60 = $59; //@line 70 "../../src/imu/imu.c"
-  $61 = $60 / 2.0; //@line 70 "../../src/imu/imu.c"
-  $62 = (+Math_sin((+$61))); //@line 70 "../../src/imu/imu.c"
-  $63 = $62; //@line 70 "../../src/imu/imu.c"
-  $14 = $63; //@line 70 "../../src/imu/imu.c"
-  $64 = $13; //@line 71 "../../src/imu/imu.c"
-  $65 = $64; //@line 71 "../../src/imu/imu.c"
-  $66 = $65 / 2.0; //@line 71 "../../src/imu/imu.c"
-  $67 = (+Math_cos((+$66))); //@line 71 "../../src/imu/imu.c"
-  $68 = $67; //@line 71 "../../src/imu/imu.c"
-  $15 = $68; //@line 71 "../../src/imu/imu.c"
-  $69 = $14; //@line 73 "../../src/imu/imu.c"
-  $70 = $12; //@line 73 "../../src/imu/imu.c"
-  $71 = $69 / $70; //@line 73 "../../src/imu/imu.c"
-  ;HEAP32[$$byval_copy9>>2]=HEAP32[$9>>2]|0;HEAP32[$$byval_copy9+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$$byval_copy9+8>>2]=HEAP32[$9+8>>2]|0; //@line 73 "../../src/imu/imu.c"
-  _v3_muls_12($17,$$byval_copy9,$71); //@line 73 "../../src/imu/imu.c"
-  $72 = +HEAPF32[$17>>2]; //@line 75 "../../src/imu/imu.c"
-  $73 = ((($17)) + 4|0); //@line 75 "../../src/imu/imu.c"
-  $74 = +HEAPF32[$73>>2]; //@line 75 "../../src/imu/imu.c"
-  $75 = - $74; //@line 75 "../../src/imu/imu.c"
-  $76 = ((($17)) + 8|0); //@line 75 "../../src/imu/imu.c"
-  $77 = +HEAPF32[$76>>2]; //@line 75 "../../src/imu/imu.c"
-  $78 = - $77; //@line 75 "../../src/imu/imu.c"
-  $79 = $15; //@line 75 "../../src/imu/imu.c"
-  _quaternion($18,$72,$75,$78,$79); //@line 75 "../../src/imu/imu.c"
-  ;HEAP32[$16>>2]=HEAP32[$18>>2]|0;HEAP32[$16+4>>2]=HEAP32[$18+4>>2]|0;HEAP32[$16+8>>2]=HEAP32[$18+8>>2]|0;HEAP32[$16+12>>2]=HEAP32[$18+12>>2]|0; //@line 75 "../../src/imu/imu.c"
- }
- $80 = $4; //@line 78 "../../src/imu/imu.c"
- $81 = ((($80)) + 24|0); //@line 78 "../../src/imu/imu.c"
- $82 = $4; //@line 78 "../../src/imu/imu.c"
- $83 = ((($82)) + 24|0); //@line 78 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy10>>2]=HEAP32[$83>>2]|0;HEAP32[$$byval_copy10+4>>2]=HEAP32[$83+4>>2]|0;HEAP32[$$byval_copy10+8>>2]=HEAP32[$83+8>>2]|0;HEAP32[$$byval_copy10+12>>2]=HEAP32[$83+12>>2]|0; //@line 78 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy11>>2]=HEAP32[$16>>2]|0;HEAP32[$$byval_copy11+4>>2]=HEAP32[$16+4>>2]|0;HEAP32[$$byval_copy11+8>>2]=HEAP32[$16+8>>2]|0;HEAP32[$$byval_copy11+12>>2]=HEAP32[$16+12>>2]|0; //@line 78 "../../src/imu/imu.c"
- _quaternion_multiply_14($19,$$byval_copy10,$$byval_copy11); //@line 78 "../../src/imu/imu.c"
- ;HEAP32[$81>>2]=HEAP32[$19>>2]|0;HEAP32[$81+4>>2]=HEAP32[$19+4>>2]|0;HEAP32[$81+8>>2]=HEAP32[$19+8>>2]|0;HEAP32[$81+12>>2]=HEAP32[$19+12>>2]|0; //@line 78 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 81 "../../src/imu/imu.c"
+ $6 = $3;
+ $10 = $4; //@line 34 "src/imu/imu.c"
+ $11 = ((($10)) + 56|0); //@line 34 "src/imu/imu.c"
+ $12 = $4; //@line 34 "src/imu/imu.c"
+ $13 = ((($12)) + 80|0); //@line 34 "src/imu/imu.c"
+ $14 = ((($1)) + 16|0); //@line 34 "src/imu/imu.c"
+ $15 = +HEAPF64[$14>>3]; //@line 34 "src/imu/imu.c"
+ $16 = $15; //@line 34 "src/imu/imu.c"
+ $17 = ((($1)) + 16|0); //@line 34 "src/imu/imu.c"
+ $18 = ((($17)) + 8|0); //@line 34 "src/imu/imu.c"
+ $19 = +HEAPF64[$18>>3]; //@line 34 "src/imu/imu.c"
+ $20 = $19; //@line 34 "src/imu/imu.c"
+ $21 = ((($1)) + 16|0); //@line 34 "src/imu/imu.c"
+ $22 = ((($21)) + 16|0); //@line 34 "src/imu/imu.c"
+ $23 = +HEAPF64[$22>>3]; //@line 34 "src/imu/imu.c"
+ $24 = $23; //@line 34 "src/imu/imu.c"
+ _vec3_10($8,$16,$20,$24); //@line 34 "src/imu/imu.c"
+ $25 = $4; //@line 34 "src/imu/imu.c"
+ $26 = ((($25)) + 68|0); //@line 34 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy>>2]=HEAP32[$8>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$8+8>>2]|0; //@line 34 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy1>>2]=HEAP32[$26>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$26+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$26+8>>2]|0; //@line 34 "src/imu/imu.c"
+ _v3_sub_11($7,$$byval_copy,$$byval_copy1); //@line 34 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy2>>2]=HEAP32[$13>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$13+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$13+8>>2]|0; //@line 34 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy3>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$7+8>>2]|0; //@line 34 "src/imu/imu.c"
+ _v3_mul($9,$$byval_copy2,$$byval_copy3); //@line 34 "src/imu/imu.c"
+ ;HEAP32[$11>>2]=HEAP32[$9>>2]|0;HEAP32[$11+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$11+8>>2]=HEAP32[$9+8>>2]|0; //@line 34 "src/imu/imu.c"
+ STACKTOP = sp;return; //@line 35 "src/imu/imu.c"
 }
 function _v3_sub_11($0,$1,$2) {
  $0 = $0|0;
@@ -5066,25 +4875,25 @@ function _v3_sub_11($0,$1,$2) {
  $2 = $2|0;
  var $10 = 0.0, $11 = 0.0, $12 = 0, $13 = 0, $14 = 0.0, $15 = 0, $16 = 0.0, $17 = 0.0, $3 = 0.0, $4 = 0.0, $5 = 0.0, $6 = 0, $7 = 0, $8 = 0.0, $9 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- $3 = +HEAPF32[$1>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $4 = +HEAPF32[$2>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = $3 - $4; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$0>>2] = $5; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $6 = ((($0)) + 4|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $7 = ((($1)) + 4|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = +HEAPF32[$7>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = ((($2)) + 4|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = +HEAPF32[$9>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = $8 - $10; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$6>>2] = $11; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $12 = ((($0)) + 8|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $13 = ((($1)) + 8|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $14 = +HEAPF32[$13>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $15 = ((($2)) + 8|0); //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $16 = +HEAPF32[$15>>2]; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $17 = $14 - $16; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$12>>2] = $17; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
- return; //@line 104 "../../src/imu/../quaternion/../math3d/math_3d.h"
+ $3 = +HEAPF32[$1>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $4 = +HEAPF32[$2>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $5 = $3 - $4; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$0>>2] = $5; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $6 = ((($0)) + 4|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $7 = ((($1)) + 4|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $8 = +HEAPF32[$7>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $9 = ((($2)) + 4|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $10 = +HEAPF32[$9>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $11 = $8 - $10; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$6>>2] = $11; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $12 = ((($0)) + 8|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $13 = ((($1)) + 8|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $14 = +HEAPF32[$13>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $15 = ((($2)) + 8|0); //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $16 = +HEAPF32[$15>>2]; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ $17 = $14 - $16; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$12>>2] = $17; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
+ return; //@line 104 "src/imu/../quaternion/../math3d/math_3d.h"
 }
 function _v3_mul($0,$1,$2) {
  $0 = $0|0;
@@ -5092,25 +4901,312 @@ function _v3_mul($0,$1,$2) {
  $2 = $2|0;
  var $10 = 0.0, $11 = 0.0, $12 = 0, $13 = 0, $14 = 0.0, $15 = 0, $16 = 0.0, $17 = 0.0, $3 = 0.0, $4 = 0.0, $5 = 0.0, $6 = 0, $7 = 0, $8 = 0.0, $9 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- $3 = +HEAPF32[$1>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $4 = +HEAPF32[$2>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = $3 * $4; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$0>>2] = $5; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $6 = ((($0)) + 4|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $7 = ((($1)) + 4|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = +HEAPF32[$7>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = ((($2)) + 4|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = +HEAPF32[$9>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = $8 * $10; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$6>>2] = $11; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $12 = ((($0)) + 8|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $13 = ((($1)) + 8|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $14 = +HEAPF32[$13>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $15 = ((($2)) + 8|0); //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $16 = +HEAPF32[$15>>2]; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $17 = $14 * $16; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$12>>2] = $17; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
- return; //@line 106 "../../src/imu/../quaternion/../math3d/math_3d.h"
+ $3 = +HEAPF32[$1>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $4 = +HEAPF32[$2>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $5 = $3 * $4; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$0>>2] = $5; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $6 = ((($0)) + 4|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $7 = ((($1)) + 4|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $8 = +HEAPF32[$7>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $9 = ((($2)) + 4|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $10 = +HEAPF32[$9>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $11 = $8 * $10; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$6>>2] = $11; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $12 = ((($0)) + 8|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $13 = ((($1)) + 8|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $14 = +HEAPF32[$13>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $15 = ((($2)) + 8|0); //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $16 = +HEAPF32[$15>>2]; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ $17 = $14 * $16; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$12>>2] = $17; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+ return; //@line 106 "src/imu/../quaternion/../math3d/math_3d.h"
+}
+function _imu_update_magnetic_field($0,$1,$2,$3) {
+ $0 = $0|0;
+ $1 = $1|0;
+ $2 = $2|0;
+ $3 = $3|0;
+ var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0.0, $17 = 0, $18 = 0, $19 = 0.0, $20 = 0.0, $21 = 0, $22 = 0, $23 = 0.0, $24 = 0.0, $25 = 0;
+ var $26 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
+ sp = STACKTOP;
+ STACKTOP = STACKTOP + 96|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(96|0);
+ $$byval_copy3 = sp + 84|0;
+ $$byval_copy2 = sp + 72|0;
+ $$byval_copy1 = sp + 60|0;
+ $$byval_copy = sp + 48|0;
+ $7 = sp + 24|0;
+ $8 = sp + 12|0;
+ $9 = sp;
+ $4 = $0;
+ $5 = $2;
+ $6 = $3;
+ $10 = $4; //@line 39 "src/imu/imu.c"
+ $11 = ((($10)) + 92|0); //@line 39 "src/imu/imu.c"
+ $12 = $4; //@line 39 "src/imu/imu.c"
+ $13 = ((($12)) + 116|0); //@line 39 "src/imu/imu.c"
+ $14 = ((($1)) + 16|0); //@line 39 "src/imu/imu.c"
+ $15 = +HEAPF64[$14>>3]; //@line 39 "src/imu/imu.c"
+ $16 = $15; //@line 39 "src/imu/imu.c"
+ $17 = ((($1)) + 16|0); //@line 39 "src/imu/imu.c"
+ $18 = ((($17)) + 8|0); //@line 39 "src/imu/imu.c"
+ $19 = +HEAPF64[$18>>3]; //@line 39 "src/imu/imu.c"
+ $20 = $19; //@line 39 "src/imu/imu.c"
+ $21 = ((($1)) + 16|0); //@line 39 "src/imu/imu.c"
+ $22 = ((($21)) + 16|0); //@line 39 "src/imu/imu.c"
+ $23 = +HEAPF64[$22>>3]; //@line 39 "src/imu/imu.c"
+ $24 = $23; //@line 39 "src/imu/imu.c"
+ _vec3_10($8,$16,$20,$24); //@line 39 "src/imu/imu.c"
+ $25 = $4; //@line 39 "src/imu/imu.c"
+ $26 = ((($25)) + 104|0); //@line 39 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy>>2]=HEAP32[$8>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$8+8>>2]|0; //@line 39 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy1>>2]=HEAP32[$26>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$26+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$26+8>>2]|0; //@line 39 "src/imu/imu.c"
+ _v3_sub_11($7,$$byval_copy,$$byval_copy1); //@line 39 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy2>>2]=HEAP32[$13>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$13+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$13+8>>2]|0; //@line 39 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy3>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$7+8>>2]|0; //@line 39 "src/imu/imu.c"
+ _v3_mul($9,$$byval_copy2,$$byval_copy3); //@line 39 "src/imu/imu.c"
+ ;HEAP32[$11>>2]=HEAP32[$9>>2]|0;HEAP32[$11+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$11+8>>2]=HEAP32[$9+8>>2]|0; //@line 39 "src/imu/imu.c"
+ STACKTOP = sp;return; //@line 40 "src/imu/imu.c"
+}
+function _imu_update_gyro($0,$1,$2,$3) {
+ $0 = $0|0;
+ $1 = $1|0;
+ $2 = $2|0;
+ $3 = $3|0;
+ var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $$byval_copy4 = 0, $10 = 0, $100 = 0.0, $101 = 0, $102 = 0, $103 = 0, $104 = 0, $105 = 0, $106 = 0, $107 = 0, $108 = 0, $109 = 0, $11 = 0.0, $110 = 0, $111 = 0, $112 = 0;
+ var $113 = 0, $114 = 0, $115 = 0, $116 = 0, $117 = 0, $118 = 0.0, $119 = 0.0, $12 = 0, $120 = 0, $121 = 0, $122 = 0, $123 = 0, $124 = 0, $125 = 0, $126 = 0, $127 = 0, $128 = 0.0, $129 = 0.0, $13 = 0, $130 = 0;
+ var $131 = 0, $132 = 0, $133 = 0, $134 = 0, $135 = 0, $136 = 0, $137 = 0, $138 = 0, $139 = 0.0, $14 = 0, $140 = 0.0, $141 = 0, $142 = 0, $143 = 0, $144 = 0, $145 = 0, $146 = 0, $147 = 0, $148 = 0, $149 = 0.0;
+ var $15 = 0, $150 = 0.0, $151 = 0, $152 = 0, $153 = 0, $154 = 0, $155 = 0, $156 = 0, $157 = 0, $158 = 0, $159 = 0, $16 = 0, $160 = 0.0, $161 = 0.0, $162 = 0, $163 = 0, $164 = 0, $165 = 0, $166 = 0, $167 = 0;
+ var $168 = 0, $169 = 0, $17 = 0.0, $170 = 0, $171 = 0, $172 = 0.0, $173 = 0.0, $174 = 0, $175 = 0, $176 = 0, $177 = 0, $178 = 0, $179 = 0, $18 = 0.0, $180 = 0, $181 = 0, $182 = 0, $183 = 0, $184 = 0.0, $185 = 0.0;
+ var $186 = 0, $187 = 0, $188 = 0, $189 = 0, $19 = 0, $190 = 0, $191 = 0, $192 = 0, $193 = 0, $194 = 0, $20 = 0, $21 = 0.0, $22 = 0.0, $23 = 0, $24 = 0, $25 = 0.0, $26 = 0.0, $27 = 0, $28 = 0, $29 = 0;
+ var $30 = 0, $31 = 0, $32 = 0.0, $33 = 0, $34 = 0.0, $35 = 0, $36 = 0, $37 = 0, $38 = 0.0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0, $46 = 0.0, $47 = 0, $48 = 0;
+ var $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0.0, $53 = 0, $54 = 0, $55 = 0, $56 = 0.0, $57 = 0.0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0.0, $62 = 0.0, $63 = 0, $64 = 0, $65 = 0.0, $66 = 0;
+ var $67 = 0, $68 = 0, $69 = 0.0, $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0.0, $74 = 0.0, $75 = 0, $76 = 0, $77 = 0.0, $78 = 0.0, $79 = 0, $8 = 0, $80 = 0, $81 = 0, $82 = 0.0, $83 = 0.0, $84 = 0;
+ var $85 = 0, $86 = 0, $87 = 0.0, $88 = 0.0, $89 = 0, $9 = 0, $90 = 0, $91 = 0.0, $92 = 0, $93 = 0, $94 = 0.0, $95 = 0, $96 = 0, $97 = 0, $98 = 0, $99 = 0, label = 0, sp = 0;
+ sp = STACKTOP;
+ STACKTOP = STACKTOP + 128|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(128|0);
+ $$byval_copy4 = sp + 112|0;
+ $$byval_copy3 = sp + 100|0;
+ $$byval_copy2 = sp + 88|0;
+ $$byval_copy1 = sp + 76|0;
+ $$byval_copy = sp + 64|0;
+ $7 = sp + 40|0;
+ $8 = sp + 28|0;
+ $9 = sp + 16|0;
+ $10 = sp + 4|0;
+ $4 = $0;
+ $5 = $2;
+ $6 = $3;
+ $12 = $4; //@line 44 "src/imu/imu.c"
+ $13 = ((($12)) + 16|0); //@line 44 "src/imu/imu.c"
+ $14 = $4; //@line 44 "src/imu/imu.c"
+ $15 = ((($14)) + 40|0); //@line 44 "src/imu/imu.c"
+ $16 = ((($1)) + 16|0); //@line 44 "src/imu/imu.c"
+ $17 = +HEAPF64[$16>>3]; //@line 44 "src/imu/imu.c"
+ $18 = $17; //@line 44 "src/imu/imu.c"
+ $19 = ((($1)) + 16|0); //@line 44 "src/imu/imu.c"
+ $20 = ((($19)) + 8|0); //@line 44 "src/imu/imu.c"
+ $21 = +HEAPF64[$20>>3]; //@line 44 "src/imu/imu.c"
+ $22 = $21; //@line 44 "src/imu/imu.c"
+ $23 = ((($1)) + 16|0); //@line 44 "src/imu/imu.c"
+ $24 = ((($23)) + 16|0); //@line 44 "src/imu/imu.c"
+ $25 = +HEAPF64[$24>>3]; //@line 44 "src/imu/imu.c"
+ $26 = $25; //@line 44 "src/imu/imu.c"
+ _vec3_10($9,$18,$22,$26); //@line 44 "src/imu/imu.c"
+ $27 = $4; //@line 44 "src/imu/imu.c"
+ $28 = ((($27)) + 28|0); //@line 44 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy>>2]=HEAP32[$9>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$9+8>>2]|0; //@line 44 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy1>>2]=HEAP32[$28>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$28+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$28+8>>2]|0; //@line 44 "src/imu/imu.c"
+ _v3_sub_11($8,$$byval_copy,$$byval_copy1); //@line 44 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy2>>2]=HEAP32[$15>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$15+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$15+8>>2]|0; //@line 44 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy3>>2]=HEAP32[$8>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$8+8>>2]|0; //@line 44 "src/imu/imu.c"
+ _v3_mul($7,$$byval_copy2,$$byval_copy3); //@line 44 "src/imu/imu.c"
+ ;HEAP32[$$byval_copy4>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy4+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy4+8>>2]=HEAP32[$7+8>>2]|0; //@line 44 "src/imu/imu.c"
+ _v3_muls_12($10,$$byval_copy4,0.0012199999764561653); //@line 44 "src/imu/imu.c"
+ ;HEAP32[$13>>2]=HEAP32[$10>>2]|0;HEAP32[$13+4>>2]=HEAP32[$10+4>>2]|0;HEAP32[$13+8>>2]=HEAP32[$10+8>>2]|0; //@line 44 "src/imu/imu.c"
+ $29 = $4; //@line 46 "src/imu/imu.c"
+ $30 = ((($29)) + 128|0); //@line 46 "src/imu/imu.c"
+ $31 = ((($30)) + 32|0); //@line 46 "src/imu/imu.c"
+ $32 = +HEAPF64[$31>>3]; //@line 46 "src/imu/imu.c"
+ $33 = $32 == 0.0; //@line 46 "src/imu/imu.c"
+ if ($33) {
+  $34 = +HEAPF64[$1>>3]; //@line 48 "src/imu/imu.c"
+  $35 = $4; //@line 48 "src/imu/imu.c"
+  $36 = ((($35)) + 128|0); //@line 48 "src/imu/imu.c"
+  $37 = ((($36)) + 32|0); //@line 48 "src/imu/imu.c"
+  HEAPF64[$37>>3] = $34; //@line 48 "src/imu/imu.c"
+ }
+ $38 = +HEAPF64[$1>>3]; //@line 50 "src/imu/imu.c"
+ $39 = $4; //@line 50 "src/imu/imu.c"
+ $40 = ((($39)) + 128|0); //@line 50 "src/imu/imu.c"
+ $41 = ((($40)) + 32|0); //@line 50 "src/imu/imu.c"
+ $42 = +HEAPF64[$41>>3]; //@line 50 "src/imu/imu.c"
+ $43 = $38 - $42; //@line 50 "src/imu/imu.c"
+ $44 = 0.001 * $43; //@line 50 "src/imu/imu.c"
+ $45 = $44; //@line 50 "src/imu/imu.c"
+ $11 = $45; //@line 50 "src/imu/imu.c"
+ $46 = +HEAPF64[$1>>3]; //@line 51 "src/imu/imu.c"
+ $47 = $4; //@line 51 "src/imu/imu.c"
+ $48 = ((($47)) + 128|0); //@line 51 "src/imu/imu.c"
+ $49 = ((($48)) + 32|0); //@line 51 "src/imu/imu.c"
+ HEAPF64[$49>>3] = $46; //@line 51 "src/imu/imu.c"
+ $50 = $4; //@line 53 "src/imu/imu.c"
+ $51 = ((($50)) + 16|0); //@line 53 "src/imu/imu.c"
+ $52 = +HEAPF32[$51>>2]; //@line 53 "src/imu/imu.c"
+ $53 = $4; //@line 54 "src/imu/imu.c"
+ $54 = ((($53)) + 16|0); //@line 54 "src/imu/imu.c"
+ $55 = ((($54)) + 4|0); //@line 54 "src/imu/imu.c"
+ $56 = +HEAPF32[$55>>2]; //@line 54 "src/imu/imu.c"
+ $57 = - $56; //@line 54 "src/imu/imu.c"
+ $58 = $4; //@line 55 "src/imu/imu.c"
+ $59 = ((($58)) + 16|0); //@line 55 "src/imu/imu.c"
+ $60 = ((($59)) + 8|0); //@line 55 "src/imu/imu.c"
+ $61 = +HEAPF32[$60>>2]; //@line 55 "src/imu/imu.c"
+ $62 = - $61; //@line 55 "src/imu/imu.c"
+ $63 = $4; //@line 56 "src/imu/imu.c"
+ $64 = ((($63)) + 56|0); //@line 56 "src/imu/imu.c"
+ $65 = +HEAPF32[$64>>2]; //@line 56 "src/imu/imu.c"
+ $66 = $4; //@line 57 "src/imu/imu.c"
+ $67 = ((($66)) + 56|0); //@line 57 "src/imu/imu.c"
+ $68 = ((($67)) + 4|0); //@line 57 "src/imu/imu.c"
+ $69 = +HEAPF32[$68>>2]; //@line 57 "src/imu/imu.c"
+ $70 = $4; //@line 58 "src/imu/imu.c"
+ $71 = ((($70)) + 56|0); //@line 58 "src/imu/imu.c"
+ $72 = ((($71)) + 8|0); //@line 58 "src/imu/imu.c"
+ $73 = +HEAPF32[$72>>2]; //@line 58 "src/imu/imu.c"
+ $74 = - $73; //@line 58 "src/imu/imu.c"
+ $75 = $4; //@line 59 "src/imu/imu.c"
+ $76 = ((($75)) + 92|0); //@line 59 "src/imu/imu.c"
+ $77 = +HEAPF32[$76>>2]; //@line 59 "src/imu/imu.c"
+ $78 = - $77; //@line 59 "src/imu/imu.c"
+ $79 = $4; //@line 60 "src/imu/imu.c"
+ $80 = ((($79)) + 92|0); //@line 60 "src/imu/imu.c"
+ $81 = ((($80)) + 4|0); //@line 60 "src/imu/imu.c"
+ $82 = +HEAPF32[$81>>2]; //@line 60 "src/imu/imu.c"
+ $83 = - $82; //@line 60 "src/imu/imu.c"
+ $84 = $4; //@line 61 "src/imu/imu.c"
+ $85 = ((($84)) + 92|0); //@line 61 "src/imu/imu.c"
+ $86 = ((($85)) + 8|0); //@line 61 "src/imu/imu.c"
+ $87 = +HEAPF32[$86>>2]; //@line 61 "src/imu/imu.c"
+ $88 = $11; //@line 62 "src/imu/imu.c"
+ $89 = $4; //@line 63 "src/imu/imu.c"
+ $90 = ((($89)) + 8|0); //@line 63 "src/imu/imu.c"
+ $91 = +HEAPF32[$90>>2]; //@line 63 "src/imu/imu.c"
+ $92 = $4; //@line 64 "src/imu/imu.c"
+ $93 = ((($92)) + 12|0); //@line 64 "src/imu/imu.c"
+ $94 = +HEAPF32[$93>>2]; //@line 64 "src/imu/imu.c"
+ $95 = $4; //@line 65 "src/imu/imu.c"
+ $96 = ((($95)) + 128|0); //@line 65 "src/imu/imu.c"
+ _MadgwickAHRSupdate($52,$57,$62,$65,$69,$74,$78,$83,$87,$88,$91,$94,$96); //@line 53 "src/imu/imu.c"
+ $97 = $4; //@line 68 "src/imu/imu.c"
+ $98 = ((($97)) + 128|0); //@line 68 "src/imu/imu.c"
+ $99 = ((($98)) + 32|0); //@line 68 "src/imu/imu.c"
+ $100 = +HEAPF64[$99>>3]; //@line 68 "src/imu/imu.c"
+ $101 = $5; //@line 68 "src/imu/imu.c"
+ $102 = $6; //@line 68 "src/imu/imu.c"
+ $103 = HEAP32[$102>>2]|0; //@line 68 "src/imu/imu.c"
+ $104 = (($101) + (($103*144)|0)|0); //@line 68 "src/imu/imu.c"
+ HEAPF64[$104>>3] = $100; //@line 68 "src/imu/imu.c"
+ $105 = $5; //@line 69 "src/imu/imu.c"
+ $106 = $6; //@line 69 "src/imu/imu.c"
+ $107 = HEAP32[$106>>2]|0; //@line 69 "src/imu/imu.c"
+ $108 = (($105) + (($107*144)|0)|0); //@line 69 "src/imu/imu.c"
+ $109 = ((($108)) + 8|0); //@line 69 "src/imu/imu.c"
+ HEAP32[$109>>2] = 2000; //@line 69 "src/imu/imu.c"
+ $110 = $5; //@line 70 "src/imu/imu.c"
+ $111 = $6; //@line 70 "src/imu/imu.c"
+ $112 = HEAP32[$111>>2]|0; //@line 70 "src/imu/imu.c"
+ $113 = (($110) + (($112*144)|0)|0); //@line 70 "src/imu/imu.c"
+ $114 = ((($113)) + 12|0); //@line 70 "src/imu/imu.c"
+ HEAP32[$114>>2] = 7; //@line 70 "src/imu/imu.c"
+ $115 = $4; //@line 71 "src/imu/imu.c"
+ $116 = ((($115)) + 128|0); //@line 71 "src/imu/imu.c"
+ $117 = ((($116)) + 4|0); //@line 71 "src/imu/imu.c"
+ $118 = +HEAPF32[$117>>2]; //@line 71 "src/imu/imu.c"
+ $119 = $118; //@line 71 "src/imu/imu.c"
+ $120 = $5; //@line 71 "src/imu/imu.c"
+ $121 = $6; //@line 71 "src/imu/imu.c"
+ $122 = HEAP32[$121>>2]|0; //@line 71 "src/imu/imu.c"
+ $123 = (($120) + (($122*144)|0)|0); //@line 71 "src/imu/imu.c"
+ $124 = ((($123)) + 16|0); //@line 71 "src/imu/imu.c"
+ HEAPF64[$124>>3] = $119; //@line 71 "src/imu/imu.c"
+ $125 = $4; //@line 72 "src/imu/imu.c"
+ $126 = ((($125)) + 128|0); //@line 72 "src/imu/imu.c"
+ $127 = ((($126)) + 8|0); //@line 72 "src/imu/imu.c"
+ $128 = +HEAPF32[$127>>2]; //@line 72 "src/imu/imu.c"
+ $129 = $128; //@line 72 "src/imu/imu.c"
+ $130 = $5; //@line 72 "src/imu/imu.c"
+ $131 = $6; //@line 72 "src/imu/imu.c"
+ $132 = HEAP32[$131>>2]|0; //@line 72 "src/imu/imu.c"
+ $133 = (($130) + (($132*144)|0)|0); //@line 72 "src/imu/imu.c"
+ $134 = ((($133)) + 16|0); //@line 72 "src/imu/imu.c"
+ $135 = ((($134)) + 8|0); //@line 72 "src/imu/imu.c"
+ HEAPF64[$135>>3] = $129; //@line 72 "src/imu/imu.c"
+ $136 = $4; //@line 73 "src/imu/imu.c"
+ $137 = ((($136)) + 128|0); //@line 73 "src/imu/imu.c"
+ $138 = ((($137)) + 12|0); //@line 73 "src/imu/imu.c"
+ $139 = +HEAPF32[$138>>2]; //@line 73 "src/imu/imu.c"
+ $140 = $139; //@line 73 "src/imu/imu.c"
+ $141 = $5; //@line 73 "src/imu/imu.c"
+ $142 = $6; //@line 73 "src/imu/imu.c"
+ $143 = HEAP32[$142>>2]|0; //@line 73 "src/imu/imu.c"
+ $144 = (($141) + (($143*144)|0)|0); //@line 73 "src/imu/imu.c"
+ $145 = ((($144)) + 16|0); //@line 73 "src/imu/imu.c"
+ $146 = ((($145)) + 16|0); //@line 73 "src/imu/imu.c"
+ HEAPF64[$146>>3] = $140; //@line 73 "src/imu/imu.c"
+ $147 = $4; //@line 74 "src/imu/imu.c"
+ $148 = ((($147)) + 128|0); //@line 74 "src/imu/imu.c"
+ $149 = +HEAPF32[$148>>2]; //@line 74 "src/imu/imu.c"
+ $150 = $149; //@line 74 "src/imu/imu.c"
+ $151 = $5; //@line 74 "src/imu/imu.c"
+ $152 = $6; //@line 74 "src/imu/imu.c"
+ $153 = HEAP32[$152>>2]|0; //@line 74 "src/imu/imu.c"
+ $154 = (($151) + (($153*144)|0)|0); //@line 74 "src/imu/imu.c"
+ $155 = ((($154)) + 16|0); //@line 74 "src/imu/imu.c"
+ $156 = ((($155)) + 24|0); //@line 74 "src/imu/imu.c"
+ HEAPF64[$156>>3] = $150; //@line 74 "src/imu/imu.c"
+ $157 = $4; //@line 75 "src/imu/imu.c"
+ $158 = ((($157)) + 128|0); //@line 75 "src/imu/imu.c"
+ $159 = ((($158)) + 16|0); //@line 75 "src/imu/imu.c"
+ $160 = +HEAPF32[$159>>2]; //@line 75 "src/imu/imu.c"
+ $161 = $160; //@line 75 "src/imu/imu.c"
+ $162 = $5; //@line 75 "src/imu/imu.c"
+ $163 = $6; //@line 75 "src/imu/imu.c"
+ $164 = HEAP32[$163>>2]|0; //@line 75 "src/imu/imu.c"
+ $165 = (($162) + (($164*144)|0)|0); //@line 75 "src/imu/imu.c"
+ $166 = ((($165)) + 16|0); //@line 75 "src/imu/imu.c"
+ $167 = ((($166)) + 32|0); //@line 75 "src/imu/imu.c"
+ HEAPF64[$167>>3] = $161; //@line 75 "src/imu/imu.c"
+ $168 = $4; //@line 76 "src/imu/imu.c"
+ $169 = ((($168)) + 128|0); //@line 76 "src/imu/imu.c"
+ $170 = ((($169)) + 16|0); //@line 76 "src/imu/imu.c"
+ $171 = ((($170)) + 4|0); //@line 76 "src/imu/imu.c"
+ $172 = +HEAPF32[$171>>2]; //@line 76 "src/imu/imu.c"
+ $173 = $172; //@line 76 "src/imu/imu.c"
+ $174 = $5; //@line 76 "src/imu/imu.c"
+ $175 = $6; //@line 76 "src/imu/imu.c"
+ $176 = HEAP32[$175>>2]|0; //@line 76 "src/imu/imu.c"
+ $177 = (($174) + (($176*144)|0)|0); //@line 76 "src/imu/imu.c"
+ $178 = ((($177)) + 16|0); //@line 76 "src/imu/imu.c"
+ $179 = ((($178)) + 40|0); //@line 76 "src/imu/imu.c"
+ HEAPF64[$179>>3] = $173; //@line 76 "src/imu/imu.c"
+ $180 = $4; //@line 77 "src/imu/imu.c"
+ $181 = ((($180)) + 128|0); //@line 77 "src/imu/imu.c"
+ $182 = ((($181)) + 16|0); //@line 77 "src/imu/imu.c"
+ $183 = ((($182)) + 8|0); //@line 77 "src/imu/imu.c"
+ $184 = +HEAPF32[$183>>2]; //@line 77 "src/imu/imu.c"
+ $185 = $184; //@line 77 "src/imu/imu.c"
+ $186 = $5; //@line 77 "src/imu/imu.c"
+ $187 = $6; //@line 77 "src/imu/imu.c"
+ $188 = HEAP32[$187>>2]|0; //@line 77 "src/imu/imu.c"
+ $189 = (($186) + (($188*144)|0)|0); //@line 77 "src/imu/imu.c"
+ $190 = ((($189)) + 16|0); //@line 77 "src/imu/imu.c"
+ $191 = ((($190)) + 48|0); //@line 77 "src/imu/imu.c"
+ HEAPF64[$191>>3] = $185; //@line 77 "src/imu/imu.c"
+ $192 = $6; //@line 78 "src/imu/imu.c"
+ $193 = HEAP32[$192>>2]|0; //@line 78 "src/imu/imu.c"
+ $194 = (($193) + 1)|0; //@line 78 "src/imu/imu.c"
+ HEAP32[$192>>2] = $194; //@line 78 "src/imu/imu.c"
+ STACKTOP = sp;return; //@line 80 "src/imu/imu.c"
 }
 function _v3_muls_12($0,$1,$2) {
  $0 = $0|0;
@@ -5120,1802 +5216,23 @@ function _v3_muls_12($0,$1,$2) {
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $3 = $2;
- $4 = +HEAPF32[$1>>2]; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = $3; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $6 = $4 * $5; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$0>>2] = $6; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $7 = ((($0)) + 4|0); //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = ((($1)) + 4|0); //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = +HEAPF32[$8>>2]; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = $3; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = $9 * $10; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$7>>2] = $11; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $12 = ((($0)) + 8|0); //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $13 = ((($1)) + 8|0); //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $14 = +HEAPF32[$13>>2]; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $15 = $3; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $16 = $14 * $15; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$12>>2] = $16; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
- STACKTOP = sp;return; //@line 107 "../../src/imu/../quaternion/../math3d/math_3d.h"
-}
-function _quaternion_from_hpr($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $2 = 0.0, $3 = 0, $4 = 0.0, $5 = 0, $6 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- $2 = +HEAPF32[$1>>2]; //@line 260 "../../src/imu/imu.c"
- $3 = ((($1)) + 4|0); //@line 260 "../../src/imu/imu.c"
- $4 = +HEAPF32[$3>>2]; //@line 260 "../../src/imu/imu.c"
- $5 = ((($1)) + 8|0); //@line 260 "../../src/imu/imu.c"
- $6 = +HEAPF32[$5>>2]; //@line 260 "../../src/imu/imu.c"
- _quaternion_from_heading_pitch_roll($0,$2,$4,$6); //@line 260 "../../src/imu/imu.c"
- return; //@line 260 "../../src/imu/imu.c"
-}
-function _quaternion_rotate_vec3($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $$byval_copy = 0, $$byval_copy1 = 0, $10 = 0, $11 = 0, $12 = 0.0, $13 = 0, $14 = 0.0, $15 = 0, $16 = 0, $17 = 0.0, $18 = 0, $19 = 0, $20 = 0, $21 = 0.0, $22 = 0, $23 = 0, $3 = 0, $4 = 0, $5 = 0, $6 = 0;
- var $7 = 0.0, $8 = 0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 80|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(80|0);
- $$byval_copy1 = sp + 56|0;
- $$byval_copy = sp + 40|0;
- $4 = sp + 24|0;
- $5 = sp + 12|0;
- $6 = sp;
- $3 = $2;
- $7 = +HEAPF32[$1>>2]; //@line 257 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$5>>2] = $7; //@line 257 "../../src/imu/../quaternion/quaternion.h"
- $8 = ((($1)) + 4|0); //@line 258 "../../src/imu/../quaternion/quaternion.h"
- $9 = +HEAPF32[$8>>2]; //@line 258 "../../src/imu/../quaternion/quaternion.h"
- $10 = ((($5)) + 4|0); //@line 258 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$10>>2] = $9; //@line 258 "../../src/imu/../quaternion/quaternion.h"
- $11 = ((($1)) + 8|0); //@line 259 "../../src/imu/../quaternion/quaternion.h"
- $12 = +HEAPF32[$11>>2]; //@line 259 "../../src/imu/../quaternion/quaternion.h"
- $13 = ((($5)) + 8|0); //@line 259 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$13>>2] = $12; //@line 259 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$$byval_copy>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$0+12>>2]|0; //@line 260 "../../src/imu/../quaternion/quaternion.h"
- __sv_plus_rxv($$byval_copy,$5,$4); //@line 260 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy1+12>>2]=HEAP32[$0+12>>2]|0; //@line 261 "../../src/imu/../quaternion/quaternion.h"
- __v_plus_2rxvprime_over_m($$byval_copy1,$5,$4,2.0,$6); //@line 261 "../../src/imu/../quaternion/quaternion.h"
- $14 = +HEAPF32[$6>>2]; //@line 262 "../../src/imu/../quaternion/quaternion.h"
- $15 = $3; //@line 262 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$15>>2] = $14; //@line 262 "../../src/imu/../quaternion/quaternion.h"
- $16 = ((($6)) + 4|0); //@line 263 "../../src/imu/../quaternion/quaternion.h"
- $17 = +HEAPF32[$16>>2]; //@line 263 "../../src/imu/../quaternion/quaternion.h"
- $18 = $3; //@line 263 "../../src/imu/../quaternion/quaternion.h"
- $19 = ((($18)) + 4|0); //@line 263 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$19>>2] = $17; //@line 263 "../../src/imu/../quaternion/quaternion.h"
- $20 = ((($6)) + 8|0); //@line 264 "../../src/imu/../quaternion/quaternion.h"
- $21 = +HEAPF32[$20>>2]; //@line 264 "../../src/imu/../quaternion/quaternion.h"
- $22 = $3; //@line 264 "../../src/imu/../quaternion/quaternion.h"
- $23 = ((($22)) + 8|0); //@line 264 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$23>>2] = $21; //@line 264 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 265 "../../src/imu/../quaternion/quaternion.h"
-}
-function _v3_length_13($0) {
- $0 = $0|0;
- var $1 = 0.0, $10 = 0, $11 = 0.0, $12 = 0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0.0, $2 = 0.0, $3 = 0.0, $4 = 0, $5 = 0.0, $6 = 0, $7 = 0.0, $8 = 0.0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- $1 = +HEAPF32[$0>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $2 = +HEAPF32[$0>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $3 = $1 * $2; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $4 = ((($0)) + 4|0); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = +HEAPF32[$4>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $6 = ((($0)) + 4|0); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $7 = +HEAPF32[$6>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = $5 * $7; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = $3 + $8; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = ((($0)) + 8|0); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = +HEAPF32[$10>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $12 = ((($0)) + 8|0); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $13 = +HEAPF32[$12>>2]; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $14 = $11 * $13; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $15 = $9 + $14; //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $16 = (+Math_sqrt((+$15))); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
- return (+$16); //@line 110 "../../src/imu/../quaternion/../math3d/math_3d.h"
-}
-function _quaternion_multiply_14($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0, $14 = 0.0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0, $20 = 0.0, $21 = 0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0, $26 = 0.0, $27 = 0, $28 = 0.0, $29 = 0.0;
- var $3 = 0, $30 = 0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0, $36 = 0.0, $37 = 0, $38 = 0.0, $39 = 0.0, $4 = 0.0, $40 = 0.0, $41 = 0, $42 = 0.0, $43 = 0, $44 = 0.0, $45 = 0.0, $46 = 0.0, $47 = 0;
- var $48 = 0.0, $49 = 0, $5 = 0.0, $50 = 0.0, $51 = 0.0, $52 = 0, $53 = 0.0, $54 = 0, $55 = 0.0, $56 = 0.0, $57 = 0.0, $58 = 0, $59 = 0.0, $6 = 0.0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0, $64 = 0.0, $65 = 0;
- var $66 = 0.0, $67 = 0.0, $68 = 0.0, $69 = 0, $7 = 0, $70 = 0.0, $71 = 0, $72 = 0.0, $73 = 0.0, $74 = 0, $75 = 0.0, $76 = 0, $77 = 0.0, $78 = 0.0, $79 = 0.0, $8 = 0.0, $80 = 0, $81 = 0.0, $82 = 0, $83 = 0.0;
- var $84 = 0.0, $85 = 0.0, $86 = 0, $87 = 0.0, $88 = 0.0, $89 = 0.0, $9 = 0, $90 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $3 = sp;
- $4 = +HEAPF32[$1>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$2>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $6 = $4 * $5; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $7 = ((($1)) + 4|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $8 = +HEAPF32[$7>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $9 = ((($2)) + 4|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $10 = +HEAPF32[$9>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $11 = $8 * $10; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $12 = $6 - $11; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $13 = ((($1)) + 8|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $14 = +HEAPF32[$13>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $15 = ((($2)) + 8|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $16 = +HEAPF32[$15>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $17 = $14 * $16; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $18 = $12 - $17; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $19 = ((($1)) + 12|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $20 = +HEAPF32[$19>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $21 = ((($2)) + 12|0); //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $22 = +HEAPF32[$21>>2]; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $23 = $20 * $22; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- $24 = $18 - $23; //@line 339 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$3>>2] = $24; //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $25 = ((($3)) + 4|0); //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $26 = +HEAPF32[$1>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $27 = ((($2)) + 4|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $28 = +HEAPF32[$27>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $29 = $26 * $28; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $30 = ((($1)) + 4|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $31 = +HEAPF32[$30>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $32 = +HEAPF32[$2>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $33 = $31 * $32; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $34 = $29 + $33; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $35 = ((($1)) + 8|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $36 = +HEAPF32[$35>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $37 = ((($2)) + 12|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $38 = +HEAPF32[$37>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $39 = $36 * $38; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $40 = $34 + $39; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $41 = ((($1)) + 12|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $42 = +HEAPF32[$41>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $43 = ((($2)) + 8|0); //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $44 = +HEAPF32[$43>>2]; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $45 = $42 * $44; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- $46 = $40 - $45; //@line 340 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$25>>2] = $46; //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $47 = ((($3)) + 8|0); //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $48 = +HEAPF32[$1>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $49 = ((($2)) + 8|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $50 = +HEAPF32[$49>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $51 = $48 * $50; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $52 = ((($1)) + 4|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $53 = +HEAPF32[$52>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $54 = ((($2)) + 12|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $55 = +HEAPF32[$54>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $56 = $53 * $55; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $57 = $51 - $56; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $58 = ((($1)) + 8|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $59 = +HEAPF32[$58>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $60 = +HEAPF32[$2>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $61 = $59 * $60; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $62 = $57 + $61; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $63 = ((($1)) + 12|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $64 = +HEAPF32[$63>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $65 = ((($2)) + 4|0); //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $66 = +HEAPF32[$65>>2]; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $67 = $64 * $66; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- $68 = $62 + $67; //@line 341 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$47>>2] = $68; //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $69 = ((($3)) + 12|0); //@line 338 "../../src/imu/../quaternion/quaternion.h"
- $70 = +HEAPF32[$1>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $71 = ((($2)) + 12|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $72 = +HEAPF32[$71>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $73 = $70 * $72; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $74 = ((($1)) + 4|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $75 = +HEAPF32[$74>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $76 = ((($2)) + 8|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $77 = +HEAPF32[$76>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $78 = $75 * $77; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $79 = $73 + $78; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $80 = ((($1)) + 8|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $81 = +HEAPF32[$80>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $82 = ((($2)) + 4|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $83 = +HEAPF32[$82>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $84 = $81 * $83; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $85 = $79 - $84; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $86 = ((($1)) + 12|0); //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $87 = +HEAPF32[$86>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $88 = +HEAPF32[$2>>2]; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $89 = $87 * $88; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- $90 = $85 + $89; //@line 342 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$69>>2] = $90; //@line 338 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$3+12>>2]|0; //@line 344 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 344 "../../src/imu/../quaternion/quaternion.h"
-}
-function __sv_plus_rxv($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0.0, $11 = 0, $12 = 0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0, $17 = 0.0, $18 = 0, $19 = 0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0, $24 = 0.0, $25 = 0, $26 = 0, $27 = 0.0, $28 = 0.0, $29 = 0;
- var $3 = 0, $30 = 0.0, $31 = 0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0, $36 = 0.0, $37 = 0, $38 = 0, $39 = 0.0, $4 = 0, $40 = 0.0, $41 = 0.0, $42 = 0, $43 = 0, $44 = 0.0, $45 = 0, $46 = 0, $47 = 0.0;
- var $48 = 0.0, $49 = 0, $5 = 0.0, $50 = 0.0, $51 = 0, $52 = 0, $53 = 0.0, $54 = 0.0, $55 = 0.0, $56 = 0, $57 = 0.0, $58 = 0, $59 = 0.0, $6 = 0, $60 = 0.0, $61 = 0.0, $62 = 0, $63 = 0, $7 = 0.0, $8 = 0.0;
- var $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $3 = $1;
- $4 = $2;
- $5 = +HEAPF32[$0>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $6 = $3; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $7 = +HEAPF32[$6>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $8 = $5 * $7; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $9 = ((($0)) + 8|0); //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $10 = +HEAPF32[$9>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $11 = $3; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $12 = ((($11)) + 8|0); //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $13 = +HEAPF32[$12>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $14 = $10 * $13; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $15 = $8 + $14; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $16 = ((($0)) + 12|0); //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $17 = +HEAPF32[$16>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $18 = $3; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $19 = ((($18)) + 4|0); //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $20 = +HEAPF32[$19>>2]; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $21 = $17 * $20; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $22 = $15 - $21; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $23 = $4; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$23>>2] = $22; //@line 224 "../../src/imu/../quaternion/quaternion.h"
- $24 = +HEAPF32[$0>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $25 = $3; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $26 = ((($25)) + 4|0); //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $27 = +HEAPF32[$26>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $28 = $24 * $27; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $29 = ((($0)) + 12|0); //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $30 = +HEAPF32[$29>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $31 = $3; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $32 = +HEAPF32[$31>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $33 = $30 * $32; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $34 = $28 + $33; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $35 = ((($0)) + 4|0); //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $36 = +HEAPF32[$35>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $37 = $3; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $38 = ((($37)) + 8|0); //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $39 = +HEAPF32[$38>>2]; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $40 = $36 * $39; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $41 = $34 - $40; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $42 = $4; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $43 = ((($42)) + 4|0); //@line 225 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$43>>2] = $41; //@line 225 "../../src/imu/../quaternion/quaternion.h"
- $44 = +HEAPF32[$0>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $45 = $3; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $46 = ((($45)) + 8|0); //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $47 = +HEAPF32[$46>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $48 = $44 * $47; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $49 = ((($0)) + 4|0); //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $50 = +HEAPF32[$49>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $51 = $3; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $52 = ((($51)) + 4|0); //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $53 = +HEAPF32[$52>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $54 = $50 * $53; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $55 = $48 + $54; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $56 = ((($0)) + 8|0); //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $57 = +HEAPF32[$56>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $58 = $3; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $59 = +HEAPF32[$58>>2]; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $60 = $57 * $59; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $61 = $55 - $60; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $62 = $4; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- $63 = ((($62)) + 8|0); //@line 226 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$63>>2] = $61; //@line 226 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 227 "../../src/imu/../quaternion/quaternion.h"
-}
-function __v_plus_2rxvprime_over_m($0,$1,$2,$3,$4) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = +$3;
- $4 = $4|0;
- var $10 = 0.0, $11 = 0.0, $12 = 0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0, $19 = 0.0, $20 = 0, $21 = 0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0.0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0.0, $31 = 0.0, $32 = 0, $33 = 0.0, $34 = 0, $35 = 0.0, $36 = 0.0, $37 = 0, $38 = 0.0, $39 = 0, $40 = 0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0, $46 = 0, $47 = 0, $48 = 0, $49 = 0;
- var $5 = 0, $50 = 0.0, $51 = 0.0, $52 = 0, $53 = 0.0, $54 = 0, $55 = 0, $56 = 0.0, $57 = 0.0, $58 = 0, $59 = 0.0, $6 = 0, $60 = 0, $61 = 0.0, $62 = 0.0, $63 = 0.0, $64 = 0.0, $65 = 0.0, $66 = 0, $67 = 0;
- var $7 = 0.0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $8 = $4;
- $9 = $5; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $10 = +HEAPF32[$9>>2]; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $11 = $7; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $12 = ((($0)) + 8|0); //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $13 = +HEAPF32[$12>>2]; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $14 = $6; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $15 = ((($14)) + 8|0); //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $16 = +HEAPF32[$15>>2]; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $17 = $13 * $16; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $18 = ((($0)) + 12|0); //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $19 = +HEAPF32[$18>>2]; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $20 = $6; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $21 = ((($20)) + 4|0); //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $22 = +HEAPF32[$21>>2]; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $23 = $19 * $22; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $24 = $17 - $23; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $25 = $11 * $24; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $26 = $10 + $25; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $27 = $8; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$27>>2] = $26; //@line 230 "../../src/imu/../quaternion/quaternion.h"
- $28 = $5; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $29 = ((($28)) + 4|0); //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $30 = +HEAPF32[$29>>2]; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $31 = $7; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $32 = ((($0)) + 12|0); //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $33 = +HEAPF32[$32>>2]; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $34 = $6; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $35 = +HEAPF32[$34>>2]; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $36 = $33 * $35; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $37 = ((($0)) + 4|0); //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $38 = +HEAPF32[$37>>2]; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $39 = $6; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $40 = ((($39)) + 8|0); //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $41 = +HEAPF32[$40>>2]; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $42 = $38 * $41; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $43 = $36 - $42; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $44 = $31 * $43; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $45 = $30 + $44; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $46 = $8; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $47 = ((($46)) + 4|0); //@line 231 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$47>>2] = $45; //@line 231 "../../src/imu/../quaternion/quaternion.h"
- $48 = $5; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $49 = ((($48)) + 8|0); //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $50 = +HEAPF32[$49>>2]; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $51 = $7; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $52 = ((($0)) + 4|0); //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $53 = +HEAPF32[$52>>2]; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $54 = $6; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $55 = ((($54)) + 4|0); //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $56 = +HEAPF32[$55>>2]; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $57 = $53 * $56; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $58 = ((($0)) + 8|0); //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $59 = +HEAPF32[$58>>2]; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $60 = $6; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $61 = +HEAPF32[$60>>2]; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $62 = $59 * $61; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $63 = $57 - $62; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $64 = $51 * $63; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $65 = $50 + $64; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $66 = $8; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- $67 = ((($66)) + 8|0); //@line 232 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$67>>2] = $65; //@line 232 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 233 "../../src/imu/../quaternion/quaternion.h"
-}
-function _quaternion_from_heading_pitch_roll($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = +$1;
- $2 = +$2;
- $3 = +$3;
- var $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $26 = 0.0, $27 = 0.0, $28 = 0.0, $29 = 0.0;
- var $30 = 0.0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $34 = 0.0, $35 = 0.0, $36 = 0.0, $37 = 0.0, $38 = 0.0, $39 = 0.0, $4 = 0.0, $40 = 0.0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0, $46 = 0.0, $47 = 0.0, $48 = 0.0;
- var $49 = 0.0, $5 = 0.0, $50 = 0.0, $51 = 0.0, $52 = 0.0, $53 = 0.0, $54 = 0.0, $55 = 0.0, $56 = 0.0, $57 = 0.0, $58 = 0.0, $59 = 0.0, $6 = 0.0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0.0, $64 = 0.0, $65 = 0.0, $66 = 0.0;
- var $67 = 0.0, $68 = 0.0, $69 = 0.0, $7 = 0.0, $70 = 0.0, $71 = 0.0, $72 = 0.0, $73 = 0.0, $74 = 0.0, $75 = 0.0, $76 = 0.0, $77 = 0.0, $78 = 0.0, $79 = 0.0, $8 = 0.0, $80 = 0.0, $81 = 0.0, $82 = 0.0, $83 = 0.0, $84 = 0.0;
- var $85 = 0.0, $86 = 0.0, $87 = 0.0, $88 = 0.0, $89 = 0.0, $9 = 0.0, $90 = 0.0, $91 = 0.0, $92 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $4 = $1;
- $5 = $2;
- $6 = $3;
- $13 = $4; //@line 244 "../../src/imu/imu.c"
- $14 = (+_degrees_to_radians($13)); //@line 244 "../../src/imu/imu.c"
- $15 = $14; //@line 244 "../../src/imu/imu.c"
- $16 = $15 / 2.0; //@line 244 "../../src/imu/imu.c"
- $17 = (+Math_cos((+$16))); //@line 244 "../../src/imu/imu.c"
- $18 = $17; //@line 244 "../../src/imu/imu.c"
- $7 = $18; //@line 244 "../../src/imu/imu.c"
- $19 = $4; //@line 245 "../../src/imu/imu.c"
- $20 = (+_degrees_to_radians($19)); //@line 245 "../../src/imu/imu.c"
- $21 = $20; //@line 245 "../../src/imu/imu.c"
- $22 = $21 / 2.0; //@line 245 "../../src/imu/imu.c"
- $23 = (+Math_sin((+$22))); //@line 245 "../../src/imu/imu.c"
- $24 = $23; //@line 245 "../../src/imu/imu.c"
- $8 = $24; //@line 245 "../../src/imu/imu.c"
- $25 = $5; //@line 246 "../../src/imu/imu.c"
- $26 = (+_degrees_to_radians($25)); //@line 246 "../../src/imu/imu.c"
- $27 = $26; //@line 246 "../../src/imu/imu.c"
- $28 = $27 / 2.0; //@line 246 "../../src/imu/imu.c"
- $29 = (+Math_cos((+$28))); //@line 246 "../../src/imu/imu.c"
- $30 = $29; //@line 246 "../../src/imu/imu.c"
- $9 = $30; //@line 246 "../../src/imu/imu.c"
- $31 = $5; //@line 247 "../../src/imu/imu.c"
- $32 = (+_degrees_to_radians($31)); //@line 247 "../../src/imu/imu.c"
- $33 = $32; //@line 247 "../../src/imu/imu.c"
- $34 = $33 / 2.0; //@line 247 "../../src/imu/imu.c"
- $35 = (+Math_sin((+$34))); //@line 247 "../../src/imu/imu.c"
- $36 = $35; //@line 247 "../../src/imu/imu.c"
- $10 = $36; //@line 247 "../../src/imu/imu.c"
- $37 = $6; //@line 248 "../../src/imu/imu.c"
- $38 = (+_degrees_to_radians($37)); //@line 248 "../../src/imu/imu.c"
- $39 = $38; //@line 248 "../../src/imu/imu.c"
- $40 = $39 / 2.0; //@line 248 "../../src/imu/imu.c"
- $41 = (+Math_cos((+$40))); //@line 248 "../../src/imu/imu.c"
- $42 = $41; //@line 248 "../../src/imu/imu.c"
- $11 = $42; //@line 248 "../../src/imu/imu.c"
- $43 = $6; //@line 249 "../../src/imu/imu.c"
- $44 = (+_degrees_to_radians($43)); //@line 249 "../../src/imu/imu.c"
- $45 = $44; //@line 249 "../../src/imu/imu.c"
- $46 = $45 / 2.0; //@line 249 "../../src/imu/imu.c"
- $47 = (+Math_sin((+$46))); //@line 249 "../../src/imu/imu.c"
- $48 = $47; //@line 249 "../../src/imu/imu.c"
- $12 = $48; //@line 249 "../../src/imu/imu.c"
- $49 = $7; //@line 252 "../../src/imu/imu.c"
- $50 = $9; //@line 252 "../../src/imu/imu.c"
- $51 = $49 * $50; //@line 252 "../../src/imu/imu.c"
- $52 = $12; //@line 252 "../../src/imu/imu.c"
- $53 = $51 * $52; //@line 252 "../../src/imu/imu.c"
- $54 = $8; //@line 252 "../../src/imu/imu.c"
- $55 = $10; //@line 252 "../../src/imu/imu.c"
- $56 = $54 * $55; //@line 252 "../../src/imu/imu.c"
- $57 = $11; //@line 252 "../../src/imu/imu.c"
- $58 = $56 * $57; //@line 252 "../../src/imu/imu.c"
- $59 = $53 - $58; //@line 252 "../../src/imu/imu.c"
- $60 = $7; //@line 253 "../../src/imu/imu.c"
- $61 = $10; //@line 253 "../../src/imu/imu.c"
- $62 = $60 * $61; //@line 253 "../../src/imu/imu.c"
- $63 = $11; //@line 253 "../../src/imu/imu.c"
- $64 = $62 * $63; //@line 253 "../../src/imu/imu.c"
- $65 = $8; //@line 253 "../../src/imu/imu.c"
- $66 = $9; //@line 253 "../../src/imu/imu.c"
- $67 = $65 * $66; //@line 253 "../../src/imu/imu.c"
- $68 = $12; //@line 253 "../../src/imu/imu.c"
- $69 = $67 * $68; //@line 253 "../../src/imu/imu.c"
- $70 = $64 + $69; //@line 253 "../../src/imu/imu.c"
- $71 = $8; //@line 254 "../../src/imu/imu.c"
- $72 = $9; //@line 254 "../../src/imu/imu.c"
- $73 = $71 * $72; //@line 254 "../../src/imu/imu.c"
- $74 = $11; //@line 254 "../../src/imu/imu.c"
- $75 = $73 * $74; //@line 254 "../../src/imu/imu.c"
- $76 = $7; //@line 254 "../../src/imu/imu.c"
- $77 = $10; //@line 254 "../../src/imu/imu.c"
- $78 = $76 * $77; //@line 254 "../../src/imu/imu.c"
- $79 = $12; //@line 254 "../../src/imu/imu.c"
- $80 = $78 * $79; //@line 254 "../../src/imu/imu.c"
- $81 = $75 - $80; //@line 254 "../../src/imu/imu.c"
- $82 = $7; //@line 255 "../../src/imu/imu.c"
- $83 = $9; //@line 255 "../../src/imu/imu.c"
- $84 = $82 * $83; //@line 255 "../../src/imu/imu.c"
- $85 = $11; //@line 255 "../../src/imu/imu.c"
- $86 = $84 * $85; //@line 255 "../../src/imu/imu.c"
- $87 = $8; //@line 255 "../../src/imu/imu.c"
- $88 = $10; //@line 255 "../../src/imu/imu.c"
- $89 = $87 * $88; //@line 255 "../../src/imu/imu.c"
- $90 = $12; //@line 255 "../../src/imu/imu.c"
- $91 = $89 * $90; //@line 255 "../../src/imu/imu.c"
- $92 = $86 + $91; //@line 255 "../../src/imu/imu.c"
- _quaternion($0,$59,$70,$81,$92); //@line 252 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 252 "../../src/imu/imu.c"
-}
-function _degrees_to_radians($0) {
- $0 = +$0;
- var $1 = 0.0, $2 = 0.0, $3 = 0.0, $4 = 0.0, $5 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $1 = $0;
- $2 = $1; //@line 108 "../../src/imu/imu.c"
- $3 = $2; //@line 108 "../../src/imu/imu.c"
- $4 = 0.01745329252 * $3; //@line 108 "../../src/imu/imu.c"
- $5 = $4; //@line 108 "../../src/imu/imu.c"
- STACKTOP = sp;return (+$5); //@line 108 "../../src/imu/imu.c"
-}
-function _imu_update_gyro($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $100 = 0, $101 = 0, $102 = 0.0, $103 = 0.0, $104 = 0, $105 = 0, $106 = 0, $107 = 0, $108 = 0, $109 = 0, $11 = 0, $110 = 0, $111 = 0, $112 = 0, $113 = 0, $114 = 0, $115 = 0, $116 = 0.0, $117 = 0.0;
- var $118 = 0, $119 = 0, $12 = 0.0, $120 = 0, $121 = 0, $122 = 0, $123 = 0, $124 = 0, $125 = 0, $126 = 0, $127 = 0, $128 = 0, $129 = 0, $13 = 0.0, $130 = 0.0, $131 = 0.0, $132 = 0, $133 = 0, $134 = 0, $135 = 0;
- var $136 = 0, $137 = 0, $138 = 0, $139 = 0, $14 = 0, $140 = 0, $141 = 0, $142 = 0, $143 = 0, $144 = 0, $145 = 0, $146 = 0, $147 = 0, $148 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0, $19 = 0, $20 = 0.0;
- var $21 = 0.0, $22 = 0, $23 = 0, $24 = 0, $25 = 0.0, $26 = 0, $27 = 0, $28 = 0, $29 = 0.0, $30 = 0.0, $31 = 0, $32 = 0, $33 = 0.0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0;
- var $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0.0, $48 = 0.0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0;
- var $59 = 0, $6 = 0, $60 = 0, $61 = 0.0, $62 = 0.0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0, $74 = 0, $75 = 0.0, $76 = 0.0;
- var $77 = 0, $78 = 0, $79 = 0, $8 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0, $86 = 0, $87 = 0, $88 = 0.0, $89 = 0.0, $9 = 0, $90 = 0, $91 = 0, $92 = 0, $93 = 0, $94 = 0;
- var $95 = 0, $96 = 0, $97 = 0, $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $7 = sp + 4|0;
- $4 = $0;
- $5 = $2;
- $6 = $3;
- $9 = $4; //@line 86 "../../src/imu/imu.c"
- $10 = ((($9)) + 16|0); //@line 86 "../../src/imu/imu.c"
- $11 = ((($1)) + 16|0); //@line 86 "../../src/imu/imu.c"
- $12 = +HEAPF64[$11>>3]; //@line 86 "../../src/imu/imu.c"
- $13 = $12; //@line 86 "../../src/imu/imu.c"
- $14 = ((($1)) + 16|0); //@line 86 "../../src/imu/imu.c"
- $15 = ((($14)) + 8|0); //@line 86 "../../src/imu/imu.c"
- $16 = +HEAPF64[$15>>3]; //@line 86 "../../src/imu/imu.c"
- $17 = $16; //@line 86 "../../src/imu/imu.c"
- $18 = ((($1)) + 16|0); //@line 86 "../../src/imu/imu.c"
- $19 = ((($18)) + 16|0); //@line 86 "../../src/imu/imu.c"
- $20 = +HEAPF64[$19>>3]; //@line 86 "../../src/imu/imu.c"
- $21 = $20; //@line 86 "../../src/imu/imu.c"
- _vec3_10($7,$13,$17,$21); //@line 86 "../../src/imu/imu.c"
- ;HEAP32[$10>>2]=HEAP32[$7>>2]|0;HEAP32[$10+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$10+8>>2]=HEAP32[$7+8>>2]|0; //@line 86 "../../src/imu/imu.c"
- $22 = $4; //@line 87 "../../src/imu/imu.c"
- $23 = $4; //@line 87 "../../src/imu/imu.c"
- $24 = ((($23)) + 1376|0); //@line 87 "../../src/imu/imu.c"
- $25 = +HEAPF64[$1>>3]; //@line 87 "../../src/imu/imu.c"
- _propogate_gyro($22,$24,$25); //@line 87 "../../src/imu/imu.c"
- $26 = $4; //@line 88 "../../src/imu/imu.c"
- $27 = $4; //@line 88 "../../src/imu/imu.c"
- $28 = ((($27)) + 1312|0); //@line 88 "../../src/imu/imu.c"
- $29 = +HEAPF64[$1>>3]; //@line 88 "../../src/imu/imu.c"
- _propogate_gyro($26,$28,$29); //@line 88 "../../src/imu/imu.c"
- $30 = +HEAPF64[$1>>3]; //@line 89 "../../src/imu/imu.c"
- $31 = $4; //@line 89 "../../src/imu/imu.c"
- $32 = ((($31)) + 8|0); //@line 89 "../../src/imu/imu.c"
- HEAPF64[$32>>3] = $30; //@line 89 "../../src/imu/imu.c"
- $33 = +HEAPF64[$1>>3]; //@line 91 "../../src/imu/imu.c"
- $34 = $5; //@line 91 "../../src/imu/imu.c"
- $35 = $6; //@line 91 "../../src/imu/imu.c"
- $36 = HEAP32[$35>>2]|0; //@line 91 "../../src/imu/imu.c"
- $37 = (($34) + (($36*144)|0)|0); //@line 91 "../../src/imu/imu.c"
- HEAPF64[$37>>3] = $33; //@line 91 "../../src/imu/imu.c"
- $38 = $5; //@line 92 "../../src/imu/imu.c"
- $39 = $6; //@line 92 "../../src/imu/imu.c"
- $40 = HEAP32[$39>>2]|0; //@line 92 "../../src/imu/imu.c"
- $41 = (($38) + (($40*144)|0)|0); //@line 92 "../../src/imu/imu.c"
- $42 = ((($41)) + 8|0); //@line 92 "../../src/imu/imu.c"
- HEAP32[$42>>2] = 2000; //@line 92 "../../src/imu/imu.c"
- $8 = 0; //@line 93 "../../src/imu/imu.c"
- $43 = $4; //@line 94 "../../src/imu/imu.c"
- $44 = ((($43)) + 1312|0); //@line 94 "../../src/imu/imu.c"
- $45 = ((($44)) + 24|0); //@line 94 "../../src/imu/imu.c"
- $46 = ((($45)) + 4|0); //@line 94 "../../src/imu/imu.c"
- $47 = +HEAPF32[$46>>2]; //@line 94 "../../src/imu/imu.c"
- $48 = $47; //@line 94 "../../src/imu/imu.c"
- $49 = $5; //@line 94 "../../src/imu/imu.c"
- $50 = $6; //@line 94 "../../src/imu/imu.c"
- $51 = HEAP32[$50>>2]|0; //@line 94 "../../src/imu/imu.c"
- $52 = (($49) + (($51*144)|0)|0); //@line 94 "../../src/imu/imu.c"
- $53 = ((($52)) + 16|0); //@line 94 "../../src/imu/imu.c"
- $54 = $8; //@line 94 "../../src/imu/imu.c"
- $55 = (($54) + 1)|0; //@line 94 "../../src/imu/imu.c"
- $8 = $55; //@line 94 "../../src/imu/imu.c"
- $56 = (($53) + ($54<<3)|0); //@line 94 "../../src/imu/imu.c"
- HEAPF64[$56>>3] = $48; //@line 94 "../../src/imu/imu.c"
- $57 = $4; //@line 95 "../../src/imu/imu.c"
- $58 = ((($57)) + 1312|0); //@line 95 "../../src/imu/imu.c"
- $59 = ((($58)) + 24|0); //@line 95 "../../src/imu/imu.c"
- $60 = ((($59)) + 8|0); //@line 95 "../../src/imu/imu.c"
- $61 = +HEAPF32[$60>>2]; //@line 95 "../../src/imu/imu.c"
- $62 = $61; //@line 95 "../../src/imu/imu.c"
- $63 = $5; //@line 95 "../../src/imu/imu.c"
- $64 = $6; //@line 95 "../../src/imu/imu.c"
- $65 = HEAP32[$64>>2]|0; //@line 95 "../../src/imu/imu.c"
- $66 = (($63) + (($65*144)|0)|0); //@line 95 "../../src/imu/imu.c"
- $67 = ((($66)) + 16|0); //@line 95 "../../src/imu/imu.c"
- $68 = $8; //@line 95 "../../src/imu/imu.c"
- $69 = (($68) + 1)|0; //@line 95 "../../src/imu/imu.c"
- $8 = $69; //@line 95 "../../src/imu/imu.c"
- $70 = (($67) + ($68<<3)|0); //@line 95 "../../src/imu/imu.c"
- HEAPF64[$70>>3] = $62; //@line 95 "../../src/imu/imu.c"
- $71 = $4; //@line 96 "../../src/imu/imu.c"
- $72 = ((($71)) + 1312|0); //@line 96 "../../src/imu/imu.c"
- $73 = ((($72)) + 24|0); //@line 96 "../../src/imu/imu.c"
- $74 = ((($73)) + 12|0); //@line 96 "../../src/imu/imu.c"
- $75 = +HEAPF32[$74>>2]; //@line 96 "../../src/imu/imu.c"
- $76 = $75; //@line 96 "../../src/imu/imu.c"
- $77 = $5; //@line 96 "../../src/imu/imu.c"
- $78 = $6; //@line 96 "../../src/imu/imu.c"
- $79 = HEAP32[$78>>2]|0; //@line 96 "../../src/imu/imu.c"
- $80 = (($77) + (($79*144)|0)|0); //@line 96 "../../src/imu/imu.c"
- $81 = ((($80)) + 16|0); //@line 96 "../../src/imu/imu.c"
- $82 = $8; //@line 96 "../../src/imu/imu.c"
- $83 = (($82) + 1)|0; //@line 96 "../../src/imu/imu.c"
- $8 = $83; //@line 96 "../../src/imu/imu.c"
- $84 = (($81) + ($82<<3)|0); //@line 96 "../../src/imu/imu.c"
- HEAPF64[$84>>3] = $76; //@line 96 "../../src/imu/imu.c"
- $85 = $4; //@line 97 "../../src/imu/imu.c"
- $86 = ((($85)) + 1312|0); //@line 97 "../../src/imu/imu.c"
- $87 = ((($86)) + 24|0); //@line 97 "../../src/imu/imu.c"
- $88 = +HEAPF32[$87>>2]; //@line 97 "../../src/imu/imu.c"
- $89 = $88; //@line 97 "../../src/imu/imu.c"
- $90 = $5; //@line 97 "../../src/imu/imu.c"
- $91 = $6; //@line 97 "../../src/imu/imu.c"
- $92 = HEAP32[$91>>2]|0; //@line 97 "../../src/imu/imu.c"
- $93 = (($90) + (($92*144)|0)|0); //@line 97 "../../src/imu/imu.c"
- $94 = ((($93)) + 16|0); //@line 97 "../../src/imu/imu.c"
- $95 = $8; //@line 97 "../../src/imu/imu.c"
- $96 = (($95) + 1)|0; //@line 97 "../../src/imu/imu.c"
- $8 = $96; //@line 97 "../../src/imu/imu.c"
- $97 = (($94) + ($95<<3)|0); //@line 97 "../../src/imu/imu.c"
- HEAPF64[$97>>3] = $89; //@line 97 "../../src/imu/imu.c"
- $98 = $4; //@line 98 "../../src/imu/imu.c"
- $99 = ((($98)) + 1440|0); //@line 98 "../../src/imu/imu.c"
- $100 = ((($99)) + 24|0); //@line 98 "../../src/imu/imu.c"
- $101 = ((($100)) + 4|0); //@line 98 "../../src/imu/imu.c"
- $102 = +HEAPF32[$101>>2]; //@line 98 "../../src/imu/imu.c"
- $103 = $102; //@line 98 "../../src/imu/imu.c"
- $104 = $5; //@line 98 "../../src/imu/imu.c"
- $105 = $6; //@line 98 "../../src/imu/imu.c"
- $106 = HEAP32[$105>>2]|0; //@line 98 "../../src/imu/imu.c"
- $107 = (($104) + (($106*144)|0)|0); //@line 98 "../../src/imu/imu.c"
- $108 = ((($107)) + 16|0); //@line 98 "../../src/imu/imu.c"
- $109 = $8; //@line 98 "../../src/imu/imu.c"
- $110 = (($109) + 1)|0; //@line 98 "../../src/imu/imu.c"
- $8 = $110; //@line 98 "../../src/imu/imu.c"
- $111 = (($108) + ($109<<3)|0); //@line 98 "../../src/imu/imu.c"
- HEAPF64[$111>>3] = $103; //@line 98 "../../src/imu/imu.c"
- $112 = $4; //@line 99 "../../src/imu/imu.c"
- $113 = ((($112)) + 1440|0); //@line 99 "../../src/imu/imu.c"
- $114 = ((($113)) + 24|0); //@line 99 "../../src/imu/imu.c"
- $115 = ((($114)) + 8|0); //@line 99 "../../src/imu/imu.c"
- $116 = +HEAPF32[$115>>2]; //@line 99 "../../src/imu/imu.c"
- $117 = $116; //@line 99 "../../src/imu/imu.c"
- $118 = $5; //@line 99 "../../src/imu/imu.c"
- $119 = $6; //@line 99 "../../src/imu/imu.c"
- $120 = HEAP32[$119>>2]|0; //@line 99 "../../src/imu/imu.c"
- $121 = (($118) + (($120*144)|0)|0); //@line 99 "../../src/imu/imu.c"
- $122 = ((($121)) + 16|0); //@line 99 "../../src/imu/imu.c"
- $123 = $8; //@line 99 "../../src/imu/imu.c"
- $124 = (($123) + 1)|0; //@line 99 "../../src/imu/imu.c"
- $8 = $124; //@line 99 "../../src/imu/imu.c"
- $125 = (($122) + ($123<<3)|0); //@line 99 "../../src/imu/imu.c"
- HEAPF64[$125>>3] = $117; //@line 99 "../../src/imu/imu.c"
- $126 = $4; //@line 100 "../../src/imu/imu.c"
- $127 = ((($126)) + 1440|0); //@line 100 "../../src/imu/imu.c"
- $128 = ((($127)) + 24|0); //@line 100 "../../src/imu/imu.c"
- $129 = ((($128)) + 12|0); //@line 100 "../../src/imu/imu.c"
- $130 = +HEAPF32[$129>>2]; //@line 100 "../../src/imu/imu.c"
- $131 = $130; //@line 100 "../../src/imu/imu.c"
- $132 = $5; //@line 100 "../../src/imu/imu.c"
- $133 = $6; //@line 100 "../../src/imu/imu.c"
- $134 = HEAP32[$133>>2]|0; //@line 100 "../../src/imu/imu.c"
- $135 = (($132) + (($134*144)|0)|0); //@line 100 "../../src/imu/imu.c"
- $136 = ((($135)) + 16|0); //@line 100 "../../src/imu/imu.c"
- $137 = $8; //@line 100 "../../src/imu/imu.c"
- $138 = (($137) + 1)|0; //@line 100 "../../src/imu/imu.c"
- $8 = $138; //@line 100 "../../src/imu/imu.c"
- $139 = (($136) + ($137<<3)|0); //@line 100 "../../src/imu/imu.c"
- HEAPF64[$139>>3] = $131; //@line 100 "../../src/imu/imu.c"
- $140 = $8; //@line 102 "../../src/imu/imu.c"
- $141 = $5; //@line 102 "../../src/imu/imu.c"
- $142 = $6; //@line 102 "../../src/imu/imu.c"
- $143 = HEAP32[$142>>2]|0; //@line 102 "../../src/imu/imu.c"
- $144 = (($141) + (($143*144)|0)|0); //@line 102 "../../src/imu/imu.c"
- $145 = ((($144)) + 12|0); //@line 102 "../../src/imu/imu.c"
- HEAP32[$145>>2] = $140; //@line 102 "../../src/imu/imu.c"
- $146 = $6; //@line 103 "../../src/imu/imu.c"
- $147 = HEAP32[$146>>2]|0; //@line 103 "../../src/imu/imu.c"
- $148 = (($147) + 1)|0; //@line 103 "../../src/imu/imu.c"
- HEAP32[$146>>2] = $148; //@line 103 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 104 "../../src/imu/imu.c"
-}
-function _radians_to_degrees($0) {
- $0 = +$0;
- var $1 = 0.0, $2 = 0.0, $3 = 0.0, $4 = 0.0, $5 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $1 = $0;
- $2 = $1; //@line 112 "../../src/imu/imu.c"
- $3 = $2; //@line 112 "../../src/imu/imu.c"
- $4 = 57.295779000000003 * $3; //@line 112 "../../src/imu/imu.c"
- $5 = $4; //@line 112 "../../src/imu/imu.c"
- STACKTOP = sp;return (+$5); //@line 112 "../../src/imu/imu.c"
-}
-function _imu_update_accelerometer($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $$byval_copy = 0, $10 = 0, $11 = 0, $12 = 0.0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0, $19 = 0, $20 = 0.0, $21 = 0.0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0;
- var sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $$byval_copy = sp + 36|0;
- $7 = sp + 12|0;
- $8 = sp;
- $4 = $0;
- $5 = $2;
- $6 = $3;
- $9 = $4; //@line 117 "../../src/imu/imu.c"
- $10 = ((($9)) + 40|0); //@line 117 "../../src/imu/imu.c"
- $11 = ((($1)) + 16|0); //@line 117 "../../src/imu/imu.c"
- $12 = +HEAPF64[$11>>3]; //@line 117 "../../src/imu/imu.c"
- $13 = $12; //@line 117 "../../src/imu/imu.c"
- $14 = ((($1)) + 16|0); //@line 117 "../../src/imu/imu.c"
- $15 = ((($14)) + 8|0); //@line 117 "../../src/imu/imu.c"
- $16 = +HEAPF64[$15>>3]; //@line 117 "../../src/imu/imu.c"
- $17 = $16; //@line 117 "../../src/imu/imu.c"
- $18 = ((($1)) + 16|0); //@line 117 "../../src/imu/imu.c"
- $19 = ((($18)) + 16|0); //@line 117 "../../src/imu/imu.c"
- $20 = +HEAPF64[$19>>3]; //@line 117 "../../src/imu/imu.c"
- $21 = $20; //@line 117 "../../src/imu/imu.c"
- _vec3_10($7,$13,$17,$21); //@line 117 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$7+8>>2]|0; //@line 117 "../../src/imu/imu.c"
- _v3_norm_15($8,$$byval_copy); //@line 117 "../../src/imu/imu.c"
- ;HEAP32[$10>>2]=HEAP32[$8>>2]|0;HEAP32[$10+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$10+8>>2]=HEAP32[$8+8>>2]|0; //@line 117 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 118 "../../src/imu/imu.c"
-}
-function _v3_norm_15($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $$byval_copy = 0, $10 = 0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0, $2 = 0.0, $20 = 0, $3 = 0.0, $4 = 0.0, $5 = 0, $6 = 0.0, $7 = 0.0, $8 = 0.0, $9 = 0;
- var label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $$byval_copy = sp + 4|0;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$1+8>>2]|0; //@line 207 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $3 = (+_v3_length_13($$byval_copy)); //@line 207 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $2 = $3; //@line 207 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $4 = $2; //@line 208 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = $4 > 0.0; //@line 208 "../../src/imu/../quaternion/../math3d/math_3d.h"
- if ($5) {
-  $6 = +HEAPF32[$1>>2]; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $7 = $2; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $8 = $6 / $7; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  HEAPF32[$0>>2] = $8; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $9 = ((($0)) + 4|0); //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $10 = ((($1)) + 4|0); //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $11 = +HEAPF32[$10>>2]; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $12 = $2; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $13 = $11 / $12; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  HEAPF32[$9>>2] = $13; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $14 = ((($0)) + 8|0); //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $15 = ((($1)) + 8|0); //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $16 = +HEAPF32[$15>>2]; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $17 = $2; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $18 = $16 / $17; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  HEAPF32[$14>>2] = $18; //@line 209 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  STACKTOP = sp;return; //@line 212 "../../src/imu/../quaternion/../math3d/math_3d.h"
- } else {
-  HEAPF32[$0>>2] = 0.0; //@line 211 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $19 = ((($0)) + 4|0); //@line 211 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  HEAPF32[$19>>2] = 0.0; //@line 211 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  $20 = ((($0)) + 8|0); //@line 211 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  HEAPF32[$20>>2] = 0.0; //@line 211 "../../src/imu/../quaternion/../math3d/math_3d.h"
-  STACKTOP = sp;return; //@line 212 "../../src/imu/../quaternion/../math3d/math_3d.h"
- }
-}
-function _quaternion_set_sign_like_example($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $$byval_copy4 = 0, $$byval_copy5 = 0, $$byval_copy6 = 0, $$byval_copy7 = 0, $3 = 0, $4 = 0, $5 = 0, $6 = 0.0, $7 = 0.0, $8 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 176|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(176|0);
- $$byval_copy7 = sp + 160|0;
- $$byval_copy6 = sp + 144|0;
- $$byval_copy5 = sp + 128|0;
- $$byval_copy4 = sp + 112|0;
- $$byval_copy3 = sp + 96|0;
- $$byval_copy2 = sp + 80|0;
- $$byval_copy1 = sp + 64|0;
- $$byval_copy = sp + 48|0;
- $3 = sp + 32|0;
- $4 = sp + 16|0;
- $5 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$1+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$2>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$2+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$2+8>>2]|0;HEAP32[$$byval_copy1+12>>2]=HEAP32[$2+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- _quaternion_subtract($3,$$byval_copy,$$byval_copy1); //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy2>>2]=HEAP32[$3>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$$byval_copy2+12>>2]=HEAP32[$3+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- $6 = (+_quaternion_norm_16($$byval_copy2)); //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy3>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy3+12>>2]=HEAP32[$1+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- _quaternion_negative($5,$$byval_copy3); //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy4>>2]=HEAP32[$5>>2]|0;HEAP32[$$byval_copy4+4>>2]=HEAP32[$5+4>>2]|0;HEAP32[$$byval_copy4+8>>2]=HEAP32[$5+8>>2]|0;HEAP32[$$byval_copy4+12>>2]=HEAP32[$5+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy5>>2]=HEAP32[$2>>2]|0;HEAP32[$$byval_copy5+4>>2]=HEAP32[$2+4>>2]|0;HEAP32[$$byval_copy5+8>>2]=HEAP32[$2+8>>2]|0;HEAP32[$$byval_copy5+12>>2]=HEAP32[$2+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- _quaternion_subtract($4,$$byval_copy4,$$byval_copy5); //@line 122 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy6>>2]=HEAP32[$4>>2]|0;HEAP32[$$byval_copy6+4>>2]=HEAP32[$4+4>>2]|0;HEAP32[$$byval_copy6+8>>2]=HEAP32[$4+8>>2]|0;HEAP32[$$byval_copy6+12>>2]=HEAP32[$4+12>>2]|0; //@line 122 "../../src/imu/imu.c"
- $7 = (+_quaternion_norm_16($$byval_copy6)); //@line 122 "../../src/imu/imu.c"
- $8 = $6 < $7; //@line 122 "../../src/imu/imu.c"
- if ($8) {
-  ;HEAP32[$0>>2]=HEAP32[$1>>2]|0;HEAP32[$0+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$1+12>>2]|0; //@line 124 "../../src/imu/imu.c"
-  STACKTOP = sp;return; //@line 130 "../../src/imu/imu.c"
- } else {
-  ;HEAP32[$$byval_copy7>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy7+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy7+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy7+12>>2]=HEAP32[$1+12>>2]|0; //@line 128 "../../src/imu/imu.c"
-  _quaternion_negative($0,$$byval_copy7); //@line 128 "../../src/imu/imu.c"
-  STACKTOP = sp;return; //@line 130 "../../src/imu/imu.c"
- }
-}
-function _quaternion_subtract($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0, $11 = 0.0, $12 = 0.0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0, $17 = 0.0, $18 = 0.0, $19 = 0, $20 = 0, $21 = 0.0, $22 = 0, $23 = 0.0, $24 = 0.0, $3 = 0, $4 = 0.0, $5 = 0.0, $6 = 0.0, $7 = 0;
- var $8 = 0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $3 = sp;
- $4 = +HEAPF32[$1>>2]; //@line 311 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$2>>2]; //@line 311 "../../src/imu/../quaternion/quaternion.h"
- $6 = $4 - $5; //@line 311 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$3>>2] = $6; //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $7 = ((($3)) + 4|0); //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $8 = ((($1)) + 4|0); //@line 312 "../../src/imu/../quaternion/quaternion.h"
- $9 = +HEAPF32[$8>>2]; //@line 312 "../../src/imu/../quaternion/quaternion.h"
- $10 = ((($2)) + 4|0); //@line 312 "../../src/imu/../quaternion/quaternion.h"
- $11 = +HEAPF32[$10>>2]; //@line 312 "../../src/imu/../quaternion/quaternion.h"
- $12 = $9 - $11; //@line 312 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$7>>2] = $12; //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $13 = ((($3)) + 8|0); //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $14 = ((($1)) + 8|0); //@line 313 "../../src/imu/../quaternion/quaternion.h"
- $15 = +HEAPF32[$14>>2]; //@line 313 "../../src/imu/../quaternion/quaternion.h"
- $16 = ((($2)) + 8|0); //@line 313 "../../src/imu/../quaternion/quaternion.h"
- $17 = +HEAPF32[$16>>2]; //@line 313 "../../src/imu/../quaternion/quaternion.h"
- $18 = $15 - $17; //@line 313 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$13>>2] = $18; //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $19 = ((($3)) + 12|0); //@line 310 "../../src/imu/../quaternion/quaternion.h"
- $20 = ((($1)) + 12|0); //@line 314 "../../src/imu/../quaternion/quaternion.h"
- $21 = +HEAPF32[$20>>2]; //@line 314 "../../src/imu/../quaternion/quaternion.h"
- $22 = ((($2)) + 12|0); //@line 314 "../../src/imu/../quaternion/quaternion.h"
- $23 = +HEAPF32[$22>>2]; //@line 314 "../../src/imu/../quaternion/quaternion.h"
- $24 = $21 - $23; //@line 314 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$19>>2] = $24; //@line 310 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$3+12>>2]|0; //@line 316 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 316 "../../src/imu/../quaternion/quaternion.h"
-}
-function _quaternion_norm_16($0) {
- $0 = $0|0;
- var $1 = 0.0, $10 = 0, $11 = 0.0, $12 = 0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0, $17 = 0.0, $18 = 0, $19 = 0.0, $2 = 0.0, $20 = 0.0, $21 = 0.0, $3 = 0.0, $4 = 0, $5 = 0.0, $6 = 0, $7 = 0.0, $8 = 0.0;
- var $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- $1 = +HEAPF32[$0>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $2 = +HEAPF32[$0>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $3 = $1 * $2; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $4 = ((($0)) + 4|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$4>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $6 = ((($0)) + 4|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $7 = +HEAPF32[$6>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $8 = $5 * $7; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $9 = $3 + $8; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $10 = ((($0)) + 8|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $11 = +HEAPF32[$10>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $12 = ((($0)) + 8|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $13 = +HEAPF32[$12>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $14 = $11 * $13; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $15 = $9 + $14; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $16 = ((($0)) + 12|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $17 = +HEAPF32[$16>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $18 = ((($0)) + 12|0); //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $19 = +HEAPF32[$18>>2]; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $20 = $17 * $19; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- $21 = $15 + $20; //@line 119 "../../src/imu/../quaternion/quaternion.h"
- return (+$21); //@line 119 "../../src/imu/../quaternion/quaternion.h"
-}
-function _quaternion_negative($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $10 = 0, $11 = 0.0, $12 = 0.0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0.0, $2 = 0, $3 = 0.0, $4 = 0.0, $5 = 0, $6 = 0, $7 = 0.0, $8 = 0.0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $2 = sp;
- $3 = +HEAPF32[$1>>2]; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $4 = - $3; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$2>>2] = $4; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $5 = ((($2)) + 4|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $6 = ((($1)) + 4|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $7 = +HEAPF32[$6>>2]; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $8 = - $7; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$5>>2] = $8; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $9 = ((($2)) + 8|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $10 = ((($1)) + 8|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $11 = +HEAPF32[$10>>2]; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $12 = - $11; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$9>>2] = $12; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $13 = ((($2)) + 12|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $14 = ((($1)) + 12|0); //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $15 = +HEAPF32[$14>>2]; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- $16 = - $15; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$13>>2] = $16; //@line 186 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$0>>2]=HEAP32[$2>>2]|0;HEAP32[$0+4>>2]=HEAP32[$2+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$2+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$2+12>>2]|0; //@line 187 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 187 "../../src/imu/../quaternion/quaternion.h"
-}
-function _compare_pitch_and_roll($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy2 = 0, $$byval_copy3 = 0, $$byval_copy4 = 0, $$byval_copy5 = 0, $$byval_copy6 = 0, $$byval_copy7 = 0, $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0.0, $2 = 0.0, $3 = 0.0, $4 = 0, $5 = 0, $6 = 0;
- var $7 = 0, $8 = 0.0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 208|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(208|0);
- $$byval_copy7 = sp + 184|0;
- $$byval_copy6 = sp + 168|0;
- $$byval_copy5 = sp + 152|0;
- $$byval_copy4 = sp + 136|0;
- $$byval_copy3 = sp + 120|0;
- $$byval_copy2 = sp + 104|0;
- $$byval_copy1 = sp + 88|0;
- $$byval_copy = sp + 72|0;
- $4 = sp + 48|0;
- $5 = sp + 32|0;
- $6 = sp + 16|0;
- $7 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$0+12>>2]|0; //@line 133 "../../src/imu/imu.c"
- $8 = (+_heading_from_quaternion($$byval_copy)); //@line 133 "../../src/imu/imu.c"
- $9 = $8; //@line 133 "../../src/imu/imu.c"
- $2 = $9; //@line 133 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy1+12>>2]=HEAP32[$1+12>>2]|0; //@line 134 "../../src/imu/imu.c"
- $10 = (+_heading_from_quaternion($$byval_copy1)); //@line 134 "../../src/imu/imu.c"
- $11 = $10; //@line 134 "../../src/imu/imu.c"
- $3 = $11; //@line 134 "../../src/imu/imu.c"
- $12 = $3; //@line 136 "../../src/imu/imu.c"
- $13 = $2; //@line 136 "../../src/imu/imu.c"
- $14 = $12 - $13; //@line 136 "../../src/imu/imu.c"
- _quaternion_from_heading_pitch_roll($5,$14,0.0,0.0); //@line 136 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy2>>2]=HEAP32[$5>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$5+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$5+8>>2]|0;HEAP32[$$byval_copy2+12>>2]=HEAP32[$5+12>>2]|0; //@line 136 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy3>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy3+12>>2]=HEAP32[$0+12>>2]|0; //@line 136 "../../src/imu/imu.c"
- _quaternion_multiply_14($4,$$byval_copy2,$$byval_copy3); //@line 136 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy4>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy4+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy4+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy4+12>>2]=HEAP32[$1+12>>2]|0; //@line 137 "../../src/imu/imu.c"
- _quaternion_inverse($7,$$byval_copy4); //@line 137 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy5>>2]=HEAP32[$4>>2]|0;HEAP32[$$byval_copy5+4>>2]=HEAP32[$4+4>>2]|0;HEAP32[$$byval_copy5+8>>2]=HEAP32[$4+8>>2]|0;HEAP32[$$byval_copy5+12>>2]=HEAP32[$4+12>>2]|0; //@line 137 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy6>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy6+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy6+8>>2]=HEAP32[$7+8>>2]|0;HEAP32[$$byval_copy6+12>>2]=HEAP32[$7+12>>2]|0; //@line 137 "../../src/imu/imu.c"
- _quaternion_multiply_14($6,$$byval_copy5,$$byval_copy6); //@line 137 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy7>>2]=HEAP32[$6>>2]|0;HEAP32[$$byval_copy7+4>>2]=HEAP32[$6+4>>2]|0;HEAP32[$$byval_copy7+8>>2]=HEAP32[$6+8>>2]|0;HEAP32[$$byval_copy7+12>>2]=HEAP32[$6+12>>2]|0; //@line 137 "../../src/imu/imu.c"
- $15 = (+_quaternion_angle($$byval_copy7)); //@line 137 "../../src/imu/imu.c"
- $16 = (+_radians_to_degrees($15)); //@line 137 "../../src/imu/imu.c"
- STACKTOP = sp;return (+$16); //@line 137 "../../src/imu/imu.c"
-}
-function _heading_from_quaternion($0) {
- $0 = $0|0;
- var $$byval_copy = 0, $1 = 0, $2 = 0.0, $3 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $$byval_copy = sp + 16|0;
- $1 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$0+12>>2]|0; //@line 265 "../../src/imu/imu.c"
- _heading_pitch_roll_from_quaternion($1,$$byval_copy); //@line 265 "../../src/imu/imu.c"
- $2 = +HEAPF32[$1>>2]; //@line 266 "../../src/imu/imu.c"
- $3 = $2; //@line 266 "../../src/imu/imu.c"
- STACKTOP = sp;return (+$3); //@line 266 "../../src/imu/imu.c"
-}
-function _quaternion_inverse($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $$byval_copy = 0, $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $2 = 0.0, $20 = 0, $21 = 0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $25 = 0.0, $3 = 0, $4 = 0.0;
- var $5 = 0.0, $6 = 0.0, $7 = 0.0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $$byval_copy = sp + 24|0;
- $3 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$1+12>>2]|0; //@line 194 "../../src/imu/../quaternion/quaternion.h"
- $4 = (+_quaternion_norm_16($$byval_copy)); //@line 194 "../../src/imu/../quaternion/quaternion.h"
- $2 = $4; //@line 194 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$1>>2]; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $6 = $2; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $7 = $5 / $6; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$3>>2] = $7; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $8 = ((($3)) + 4|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $9 = ((($1)) + 4|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $10 = +HEAPF32[$9>>2]; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $11 = - $10; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $12 = $2; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $13 = $11 / $12; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$8>>2] = $13; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $14 = ((($3)) + 8|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $15 = ((($1)) + 8|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $16 = +HEAPF32[$15>>2]; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $17 = - $16; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $18 = $2; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $19 = $17 / $18; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$14>>2] = $19; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $20 = ((($3)) + 12|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $21 = ((($1)) + 12|0); //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $22 = +HEAPF32[$21>>2]; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $23 = - $22; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $24 = $2; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- $25 = $23 / $24; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$20>>2] = $25; //@line 195 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$3+12>>2]|0; //@line 196 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 196 "../../src/imu/../quaternion/quaternion.h"
-}
-function _quaternion_angle($0) {
- $0 = $0|0;
- var $$byval_copy = 0, $$byval_copy1 = 0, $1 = 0, $2 = 0.0, $3 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $$byval_copy1 = sp + 32|0;
- $$byval_copy = sp + 16|0;
- $1 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$0>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$0+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$0+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$0+12>>2]|0; //@line 125 "../../src/imu/../quaternion/quaternion.h"
- _quaternion_log($1,$$byval_copy); //@line 125 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy1+12>>2]=HEAP32[$1+12>>2]|0; //@line 125 "../../src/imu/../quaternion/quaternion.h"
- $2 = (+_quaternion_absolute($$byval_copy1)); //@line 125 "../../src/imu/../quaternion/quaternion.h"
- $3 = 2.0 * $2; //@line 125 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return (+$3); //@line 125 "../../src/imu/../quaternion/quaternion.h"
-}
-function _quaternion_absolute($0) {
- $0 = $0|0;
- var $1 = 0.0, $10 = 0, $11 = 0.0, $12 = 0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0, $17 = 0.0, $18 = 0, $19 = 0.0, $2 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0.0, $3 = 0.0, $4 = 0, $5 = 0.0;
- var $6 = 0, $7 = 0.0, $8 = 0.0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- $1 = +HEAPF32[$0>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $2 = +HEAPF32[$0>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $3 = $1 * $2; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $4 = ((($0)) + 4|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$4>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $6 = ((($0)) + 4|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $7 = +HEAPF32[$6>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $8 = $5 * $7; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $9 = $3 + $8; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $10 = ((($0)) + 8|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $11 = +HEAPF32[$10>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $12 = ((($0)) + 8|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $13 = +HEAPF32[$12>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $14 = $11 * $13; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $15 = $9 + $14; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $16 = ((($0)) + 12|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $17 = +HEAPF32[$16>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $18 = ((($0)) + 12|0); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $19 = +HEAPF32[$18>>2]; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $20 = $17 * $19; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $21 = $15 + $20; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $22 = $21; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $23 = (+Math_sqrt((+$22))); //@line 122 "../../src/imu/../quaternion/quaternion.h"
- $24 = $23; //@line 122 "../../src/imu/../quaternion/quaternion.h"
- return (+$24); //@line 122 "../../src/imu/../quaternion/quaternion.h"
-}
-function _heading_pitch_roll_from_quaternion($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $$byval_copy = 0, $10 = 0.0, $11 = 0.0, $12 = 0, $13 = 0.0, $14 = 0, $15 = 0.0, $16 = 0.0, $17 = 0.0, $18 = 0, $19 = 0.0, $2 = 0, $20 = 0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0, $25 = 0.0, $26 = 0, $27 = 0.0;
- var $28 = 0.0, $29 = 0.0, $3 = 0, $30 = 0, $31 = 0.0, $32 = 0, $33 = 0.0, $34 = 0.0, $35 = 0, $36 = 0.0, $37 = 0.0, $38 = 0.0, $39 = 0.0, $4 = 0.0, $40 = 0.0, $41 = 0.0, $42 = 0.0, $43 = 0.0, $44 = 0.0, $45 = 0.0;
- var $46 = 0.0, $47 = 0.0, $48 = 0.0, $49 = 0.0, $5 = 0.0, $50 = 0.0, $51 = 0.0, $52 = 0, $53 = 0.0, $54 = 0, $55 = 0.0, $56 = 0.0, $57 = 0, $58 = 0.0, $59 = 0.0, $6 = 0.0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0.0;
- var $64 = 0.0, $65 = 0.0, $66 = 0.0, $67 = 0.0, $68 = 0.0, $69 = 0.0, $7 = 0.0, $70 = 0.0, $71 = 0.0, $72 = 0.0, $73 = 0.0, $74 = 0.0, $75 = 0, $76 = 0, $77 = 0.0, $78 = 0, $79 = 0.0, $8 = 0.0, $80 = 0.0, $81 = 0;
- var $82 = 0.0, $83 = 0.0, $84 = 0.0, $85 = 0.0, $86 = 0.0, $87 = 0.0, $88 = 0.0, $89 = 0.0, $9 = 0.0, $90 = 0.0, $91 = 0.0, $92 = 0.0, $93 = 0.0, $94 = 0.0, $95 = 0.0, $96 = 0.0, $97 = 0.0, $98 = 0.0, $99 = 0, label = 0;
- var sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 80|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(80|0);
- $$byval_copy = sp + 64|0;
- $2 = sp + 48|0;
- $3 = sp + 32|0;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$1+12>>2]|0; //@line 227 "../../src/imu/imu.c"
- _quaternion_normalized($2,$$byval_copy); //@line 227 "../../src/imu/imu.c"
- $8 = +HEAPF32[$2>>2]; //@line 230 "../../src/imu/imu.c"
- $9 = +HEAPF32[$2>>2]; //@line 230 "../../src/imu/imu.c"
- $10 = $8 * $9; //@line 230 "../../src/imu/imu.c"
- $11 = $10; //@line 230 "../../src/imu/imu.c"
- $4 = $11; //@line 230 "../../src/imu/imu.c"
- $12 = ((($2)) + 4|0); //@line 231 "../../src/imu/imu.c"
- $13 = +HEAPF32[$12>>2]; //@line 231 "../../src/imu/imu.c"
- $14 = ((($2)) + 4|0); //@line 231 "../../src/imu/imu.c"
- $15 = +HEAPF32[$14>>2]; //@line 231 "../../src/imu/imu.c"
- $16 = $13 * $15; //@line 231 "../../src/imu/imu.c"
- $17 = $16; //@line 231 "../../src/imu/imu.c"
- $5 = $17; //@line 231 "../../src/imu/imu.c"
- $18 = ((($2)) + 8|0); //@line 232 "../../src/imu/imu.c"
- $19 = +HEAPF32[$18>>2]; //@line 232 "../../src/imu/imu.c"
- $20 = ((($2)) + 8|0); //@line 232 "../../src/imu/imu.c"
- $21 = +HEAPF32[$20>>2]; //@line 232 "../../src/imu/imu.c"
- $22 = $19 * $21; //@line 232 "../../src/imu/imu.c"
- $23 = $22; //@line 232 "../../src/imu/imu.c"
- $6 = $23; //@line 232 "../../src/imu/imu.c"
- $24 = ((($2)) + 12|0); //@line 233 "../../src/imu/imu.c"
- $25 = +HEAPF32[$24>>2]; //@line 233 "../../src/imu/imu.c"
- $26 = ((($2)) + 12|0); //@line 233 "../../src/imu/imu.c"
- $27 = +HEAPF32[$26>>2]; //@line 233 "../../src/imu/imu.c"
- $28 = $25 * $27; //@line 233 "../../src/imu/imu.c"
- $29 = $28; //@line 233 "../../src/imu/imu.c"
- $7 = $29; //@line 233 "../../src/imu/imu.c"
- $30 = ((($2)) + 4|0); //@line 235 "../../src/imu/imu.c"
- $31 = +HEAPF32[$30>>2]; //@line 235 "../../src/imu/imu.c"
- $32 = ((($2)) + 8|0); //@line 235 "../../src/imu/imu.c"
- $33 = +HEAPF32[$32>>2]; //@line 235 "../../src/imu/imu.c"
- $34 = $31 * $33; //@line 235 "../../src/imu/imu.c"
- $35 = ((($2)) + 12|0); //@line 235 "../../src/imu/imu.c"
- $36 = +HEAPF32[$35>>2]; //@line 235 "../../src/imu/imu.c"
- $37 = +HEAPF32[$2>>2]; //@line 235 "../../src/imu/imu.c"
- $38 = $36 * $37; //@line 235 "../../src/imu/imu.c"
- $39 = $34 + $38; //@line 235 "../../src/imu/imu.c"
- $40 = $39; //@line 235 "../../src/imu/imu.c"
- $41 = 2.0 * $40; //@line 235 "../../src/imu/imu.c"
- $42 = $5; //@line 235 "../../src/imu/imu.c"
- $43 = $6; //@line 235 "../../src/imu/imu.c"
- $44 = $42 - $43; //@line 235 "../../src/imu/imu.c"
- $45 = $7; //@line 235 "../../src/imu/imu.c"
- $46 = $44 - $45; //@line 235 "../../src/imu/imu.c"
- $47 = $4; //@line 235 "../../src/imu/imu.c"
- $48 = $46 + $47; //@line 235 "../../src/imu/imu.c"
- $49 = (+Math_atan2((+$41),(+$48))); //@line 235 "../../src/imu/imu.c"
- $50 = $49; //@line 235 "../../src/imu/imu.c"
- $51 = (+_radians_to_degrees($50)); //@line 235 "../../src/imu/imu.c"
- HEAPF32[$3>>2] = $51; //@line 235 "../../src/imu/imu.c"
- $52 = ((($2)) + 4|0); //@line 236 "../../src/imu/imu.c"
- $53 = +HEAPF32[$52>>2]; //@line 236 "../../src/imu/imu.c"
- $54 = ((($2)) + 12|0); //@line 236 "../../src/imu/imu.c"
- $55 = +HEAPF32[$54>>2]; //@line 236 "../../src/imu/imu.c"
- $56 = $53 * $55; //@line 236 "../../src/imu/imu.c"
- $57 = ((($2)) + 8|0); //@line 236 "../../src/imu/imu.c"
- $58 = +HEAPF32[$57>>2]; //@line 236 "../../src/imu/imu.c"
- $59 = +HEAPF32[$2>>2]; //@line 236 "../../src/imu/imu.c"
- $60 = $58 * $59; //@line 236 "../../src/imu/imu.c"
- $61 = $56 - $60; //@line 236 "../../src/imu/imu.c"
- $62 = $61; //@line 236 "../../src/imu/imu.c"
- $63 = -2.0 * $62; //@line 236 "../../src/imu/imu.c"
- $64 = $5; //@line 236 "../../src/imu/imu.c"
- $65 = $6; //@line 236 "../../src/imu/imu.c"
- $66 = $64 + $65; //@line 236 "../../src/imu/imu.c"
- $67 = $7; //@line 236 "../../src/imu/imu.c"
- $68 = $66 + $67; //@line 236 "../../src/imu/imu.c"
- $69 = $4; //@line 236 "../../src/imu/imu.c"
- $70 = $68 + $69; //@line 236 "../../src/imu/imu.c"
- $71 = $63 / $70; //@line 236 "../../src/imu/imu.c"
- $72 = (+Math_asin((+$71))); //@line 236 "../../src/imu/imu.c"
- $73 = $72; //@line 236 "../../src/imu/imu.c"
- $74 = (+_radians_to_degrees($73)); //@line 236 "../../src/imu/imu.c"
- $75 = ((($3)) + 4|0); //@line 236 "../../src/imu/imu.c"
- HEAPF32[$75>>2] = $74; //@line 236 "../../src/imu/imu.c"
- $76 = ((($2)) + 8|0); //@line 237 "../../src/imu/imu.c"
- $77 = +HEAPF32[$76>>2]; //@line 237 "../../src/imu/imu.c"
- $78 = ((($2)) + 12|0); //@line 237 "../../src/imu/imu.c"
- $79 = +HEAPF32[$78>>2]; //@line 237 "../../src/imu/imu.c"
- $80 = $77 * $79; //@line 237 "../../src/imu/imu.c"
- $81 = ((($2)) + 4|0); //@line 237 "../../src/imu/imu.c"
- $82 = +HEAPF32[$81>>2]; //@line 237 "../../src/imu/imu.c"
- $83 = +HEAPF32[$2>>2]; //@line 237 "../../src/imu/imu.c"
- $84 = $82 * $83; //@line 237 "../../src/imu/imu.c"
- $85 = $80 + $84; //@line 237 "../../src/imu/imu.c"
- $86 = $85; //@line 237 "../../src/imu/imu.c"
- $87 = 2.0 * $86; //@line 237 "../../src/imu/imu.c"
- $88 = $5; //@line 237 "../../src/imu/imu.c"
- $89 = - $88; //@line 237 "../../src/imu/imu.c"
- $90 = $6; //@line 237 "../../src/imu/imu.c"
- $91 = $89 - $90; //@line 237 "../../src/imu/imu.c"
- $92 = $7; //@line 237 "../../src/imu/imu.c"
- $93 = $91 + $92; //@line 237 "../../src/imu/imu.c"
- $94 = $4; //@line 237 "../../src/imu/imu.c"
- $95 = $93 + $94; //@line 237 "../../src/imu/imu.c"
- $96 = (+Math_atan2((+$87),(+$95))); //@line 237 "../../src/imu/imu.c"
- $97 = $96; //@line 237 "../../src/imu/imu.c"
- $98 = (+_radians_to_degrees($97)); //@line 237 "../../src/imu/imu.c"
- $99 = ((($3)) + 8|0); //@line 237 "../../src/imu/imu.c"
- HEAPF32[$99>>2] = $98; //@line 237 "../../src/imu/imu.c"
- ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0; //@line 239 "../../src/imu/imu.c"
- STACKTOP = sp;return; //@line 239 "../../src/imu/imu.c"
-}
-function _quaternion_normalized($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $$byval_copy = 0, $10 = 0.0, $11 = 0.0, $12 = 0.0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0.0, $17 = 0.0, $18 = 0, $19 = 0, $2 = 0.0, $20 = 0.0, $21 = 0.0, $22 = 0.0, $3 = 0, $4 = 0.0, $5 = 0.0, $6 = 0.0, $7 = 0.0;
- var $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $$byval_copy = sp + 24|0;
- $3 = sp;
- ;HEAP32[$$byval_copy>>2]=HEAP32[$1>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$1+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$1+8>>2]|0;HEAP32[$$byval_copy+12>>2]=HEAP32[$1+12>>2]|0; //@line 133 "../../src/imu/../quaternion/quaternion.h"
- $4 = (+_quaternion_absolute($$byval_copy)); //@line 133 "../../src/imu/../quaternion/quaternion.h"
- $2 = $4; //@line 133 "../../src/imu/../quaternion/quaternion.h"
- $5 = +HEAPF32[$1>>2]; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $6 = $2; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $7 = $5 / $6; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$3>>2] = $7; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $8 = ((($3)) + 4|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $9 = ((($1)) + 4|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $10 = +HEAPF32[$9>>2]; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $11 = $2; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $12 = $10 / $11; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$8>>2] = $12; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $13 = ((($3)) + 8|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $14 = ((($1)) + 8|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $15 = +HEAPF32[$14>>2]; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $16 = $2; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $17 = $15 / $16; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$13>>2] = $17; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $18 = ((($3)) + 12|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $19 = ((($1)) + 12|0); //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $20 = +HEAPF32[$19>>2]; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $21 = $2; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- $22 = $20 / $21; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- HEAPF32[$18>>2] = $22; //@line 134 "../../src/imu/../quaternion/quaternion.h"
- ;HEAP32[$0>>2]=HEAP32[$3>>2]|0;HEAP32[$0+4>>2]=HEAP32[$3+4>>2]|0;HEAP32[$0+8>>2]=HEAP32[$3+8>>2]|0;HEAP32[$0+12>>2]=HEAP32[$3+12>>2]|0; //@line 135 "../../src/imu/../quaternion/quaternion.h"
- STACKTOP = sp;return; //@line 135 "../../src/imu/../quaternion/quaternion.h"
-}
-function _imu_update_magnetic_field($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $$byval_copy = 0, $$byval_copy1 = 0, $$byval_copy10 = 0, $$byval_copy11 = 0, $$byval_copy12 = 0, $$byval_copy13 = 0, $$byval_copy14 = 0, $$byval_copy15 = 0, $$byval_copy16 = 0, $$byval_copy17 = 0, $$byval_copy18 = 0, $$byval_copy19 = 0, $$byval_copy2 = 0, $$byval_copy20 = 0, $$byval_copy21 = 0, $$byval_copy3 = 0, $$byval_copy4 = 0, $$byval_copy5 = 0, $$byval_copy6 = 0, $$byval_copy7 = 0;
- var $$byval_copy8 = 0, $$byval_copy9 = 0, $10 = 0, $100 = 0, $101 = 0, $102 = 0, $103 = 0, $104 = 0.0, $105 = 0, $106 = 0.0, $107 = 0, $108 = 0.0, $109 = 0, $11 = 0, $110 = 0, $111 = 0, $112 = 0.0, $113 = 0, $114 = 0, $115 = 0;
- var $116 = 0, $117 = 0, $118 = 0, $119 = 0, $12 = 0, $120 = 0, $121 = 0, $122 = 0, $123 = 0, $124 = 0, $125 = 0, $126 = 0, $127 = 0, $128 = 0.0, $129 = 0.0, $13 = 0, $130 = 0, $131 = 0, $132 = 0, $133 = 0;
- var $134 = 0, $135 = 0, $136 = 0, $137 = 0, $138 = 0.0, $139 = 0.0, $14 = 0, $140 = 0, $141 = 0, $142 = 0, $143 = 0, $144 = 0, $145 = 0, $146 = 0, $147 = 0, $148 = 0, $149 = 0.0, $15 = 0, $150 = 0.0, $151 = 0;
- var $152 = 0, $153 = 0, $154 = 0, $155 = 0, $156 = 0, $157 = 0, $158 = 0, $159 = 0, $16 = 0, $160 = 0.0, $161 = 0.0, $162 = 0, $163 = 0, $164 = 0, $165 = 0, $166 = 0, $167 = 0, $168 = 0, $169 = 0, $17 = 0.0;
- var $170 = 0.0, $171 = 0.0, $172 = 0, $173 = 0, $174 = 0, $175 = 0, $176 = 0, $177 = 0, $178 = 0, $179 = 0, $18 = 0.0, $180 = 0, $181 = 0.0, $182 = 0.0, $183 = 0, $184 = 0, $185 = 0, $186 = 0, $187 = 0, $188 = 0;
- var $189 = 0, $19 = 0.0, $190 = 0, $191 = 0, $192 = 0.0, $193 = 0.0, $194 = 0, $195 = 0, $196 = 0, $197 = 0, $198 = 0, $199 = 0, $20 = 0, $200 = 0, $201 = 0, $202 = 0, $203 = 0, $204 = 0, $205 = 0, $206 = 0;
- var $207 = 0, $208 = 0, $209 = 0, $21 = 0, $210 = 0, $211 = 0, $212 = 0, $213 = 0.0, $214 = 0, $215 = 0, $216 = 0, $217 = 0, $218 = 0, $219 = 0, $22 = 0, $220 = 0, $221 = 0, $222 = 0, $223 = 0, $224 = 0;
- var $225 = 0.0, $226 = 0.0, $227 = 0, $228 = 0, $229 = 0, $23 = 0, $230 = 0, $231 = 0.0, $232 = 0.0, $233 = 0, $234 = 0, $235 = 0, $236 = 0, $237 = 0, $238 = 0.0, $239 = 0.0, $24 = 0, $240 = 0, $241 = 0, $242 = 0;
- var $243 = 0, $244 = 0, $245 = 0.0, $246 = 0.0, $247 = 0, $248 = 0, $249 = 0.0, $25 = 0, $250 = 0, $251 = 0, $252 = 0.0, $253 = 0.0, $254 = 0, $255 = 0, $256 = 0.0, $257 = 0.0, $258 = 0, $259 = 0.0, $26 = 0, $260 = 0;
- var $261 = 0, $262 = 0, $263 = 0, $264 = 0, $265 = 0, $266 = 0.0, $267 = 0.0, $268 = 0, $269 = 0, $27 = 0, $270 = 0, $271 = 0, $272 = 0.0, $273 = 0.0, $274 = 0, $275 = 0, $276 = 0, $277 = 0, $278 = 0, $279 = 0.0;
- var $28 = 0, $280 = 0.0, $281 = 0, $282 = 0, $283 = 0, $284 = 0.0, $285 = 0, $286 = 0, $287 = 0, $288 = 0, $289 = 0, $29 = 0, $290 = 0, $291 = 0, $292 = 0, $293 = 0, $294 = 0, $295 = 0, $296 = 0, $297 = 0;
- var $298 = 0, $299 = 0, $30 = 0.0, $300 = 0.0, $301 = 0.0, $302 = 0, $303 = 0, $304 = 0, $305 = 0, $306 = 0, $307 = 0, $308 = 0, $309 = 0, $31 = 0.0, $310 = 0, $311 = 0, $312 = 0, $313 = 0, $314 = 0.0, $315 = 0.0;
- var $316 = 0, $317 = 0, $318 = 0, $319 = 0, $32 = 0, $320 = 0, $321 = 0, $322 = 0, $323 = 0, $324 = 0, $325 = 0, $326 = 0, $327 = 0, $328 = 0.0, $329 = 0.0, $33 = 0, $330 = 0, $331 = 0, $332 = 0, $333 = 0;
- var $334 = 0, $335 = 0, $336 = 0, $337 = 0, $338 = 0, $339 = 0, $34 = 0.0, $340 = 0, $341 = 0, $342 = 0.0, $343 = 0.0, $344 = 0, $345 = 0, $346 = 0, $347 = 0, $348 = 0, $349 = 0, $35 = 0.0, $350 = 0, $351 = 0;
- var $352 = 0, $353 = 0, $354 = 0, $355 = 0, $356 = 0.0, $357 = 0.0, $358 = 0, $359 = 0, $36 = 0, $360 = 0, $361 = 0, $362 = 0, $363 = 0, $364 = 0, $365 = 0, $366 = 0, $367 = 0, $368 = 0, $369 = 0, $37 = 0;
- var $370 = 0.0, $371 = 0.0, $372 = 0, $373 = 0, $374 = 0, $375 = 0, $376 = 0, $377 = 0, $378 = 0, $379 = 0, $38 = 0.0, $380 = 0, $381 = 0, $382 = 0, $383 = 0, $384 = 0.0, $385 = 0.0, $386 = 0, $387 = 0, $388 = 0;
- var $389 = 0, $39 = 0.0, $390 = 0, $391 = 0, $392 = 0, $393 = 0, $394 = 0, $395 = 0, $396 = 0, $397 = 0, $398 = 0, $399 = 0, $4 = 0, $40 = 0, $400 = 0, $401 = 0, $402 = 0, $403 = 0, $404 = 0, $405 = 0;
- var $406 = 0, $407 = 0.0, $408 = 0.0, $409 = 0, $41 = 0, $410 = 0, $411 = 0, $412 = 0, $413 = 0, $414 = 0, $415 = 0, $416 = 0.0, $417 = 0.0, $418 = 0, $419 = 0, $42 = 0, $420 = 0, $421 = 0, $422 = 0, $423 = 0;
- var $424 = 0, $425 = 0, $426 = 0.0, $427 = 0.0, $428 = 0, $429 = 0, $43 = 0, $430 = 0, $431 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0, $48 = 0.0, $49 = 0.0, $5 = 0, $50 = 0, $51 = 0.0, $52 = 0.0, $53 = 0.0;
- var $54 = 0.0, $55 = 0.0, $56 = 0.0, $57 = 0, $58 = 0.0, $59 = 0.0, $6 = 0, $60 = 0.0, $61 = 0.0, $62 = 0.0, $63 = 0, $64 = 0.0, $65 = 0, $66 = 0.0, $67 = 0.0, $68 = 0.0, $69 = 0.0, $7 = 0, $70 = 0.0, $71 = 0.0;
- var $72 = 0.0, $73 = 0.0, $74 = 0.0, $75 = 0.0, $76 = 0.0, $77 = 0.0, $78 = 0, $79 = 0.0, $8 = 0, $80 = 0, $81 = 0.0, $82 = 0.0, $83 = 0, $84 = 0.0, $85 = 0, $86 = 0.0, $87 = 0.0, $88 = 0.0, $89 = 0.0, $9 = 0;
- var $90 = 0.0, $91 = 0.0, $92 = 0.0, $93 = 0.0, $94 = 0.0, $95 = 0.0, $96 = 0.0, $97 = 0.0, $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 608|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(608|0);
- $$byval_copy21 = sp + 584|0;
- $$byval_copy20 = sp + 568|0;
- $$byval_copy19 = sp + 552|0;
- $$byval_copy18 = sp + 536|0;
- $$byval_copy17 = sp + 520|0;
- $$byval_copy16 = sp + 504|0;
- $$byval_copy15 = sp + 488|0;
- $$byval_copy14 = sp + 472|0;
- $$byval_copy13 = sp + 456|0;
- $$byval_copy12 = sp + 440|0;
- $$byval_copy11 = sp + 428|0;
- $$byval_copy10 = sp + 416|0;
- $$byval_copy9 = sp + 404|0;
- $$byval_copy8 = sp + 392|0;
- $$byval_copy7 = sp + 380|0;
- $$byval_copy6 = sp + 368|0;
- $$byval_copy5 = sp + 352|0;
- $$byval_copy4 = sp + 340|0;
- $$byval_copy3 = sp + 328|0;
- $$byval_copy2 = sp + 316|0;
- $$byval_copy1 = sp + 304|0;
- $$byval_copy = sp + 292|0;
- $7 = sp + 268|0;
- $8 = sp + 256|0;
- $9 = sp + 244|0;
- $10 = sp + 232|0;
- $11 = sp + 216|0;
- $12 = sp + 204|0;
- $13 = sp + 192|0;
- $14 = sp + 180|0;
- $15 = sp + 168|0;
- $16 = sp + 156|0;
- $20 = sp + 132|0;
- $21 = sp + 120|0;
- $22 = sp + 104|0;
- $23 = sp + 88|0;
- $25 = sp + 24|0;
- $26 = sp;
- $27 = sp + 64|0;
- $28 = sp + 48|0;
- $4 = $0;
- $5 = $2;
- $6 = $3;
- $29 = ((($1)) + 16|0); //@line 143 "../../src/imu/imu.c"
- $30 = +HEAPF64[$29>>3]; //@line 143 "../../src/imu/imu.c"
- $31 = $30; //@line 143 "../../src/imu/imu.c"
- $32 = ((($1)) + 16|0); //@line 143 "../../src/imu/imu.c"
- $33 = ((($32)) + 8|0); //@line 143 "../../src/imu/imu.c"
- $34 = +HEAPF64[$33>>3]; //@line 143 "../../src/imu/imu.c"
- $35 = $34; //@line 143 "../../src/imu/imu.c"
- $36 = ((($1)) + 16|0); //@line 143 "../../src/imu/imu.c"
- $37 = ((($36)) + 16|0); //@line 143 "../../src/imu/imu.c"
- $38 = +HEAPF64[$37>>3]; //@line 143 "../../src/imu/imu.c"
- $39 = $38; //@line 143 "../../src/imu/imu.c"
- _vec3_10($7,$31,$35,$39); //@line 143 "../../src/imu/imu.c"
- $40 = $4; //@line 145 "../../src/imu/imu.c"
- $41 = ((($40)) + 1204|0); //@line 145 "../../src/imu/imu.c"
- $42 = $4; //@line 145 "../../src/imu/imu.c"
- $43 = ((($42)) + 1192|0); //@line 145 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy>>2]=HEAP32[$7>>2]|0;HEAP32[$$byval_copy+4>>2]=HEAP32[$7+4>>2]|0;HEAP32[$$byval_copy+8>>2]=HEAP32[$7+8>>2]|0; //@line 145 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy1>>2]=HEAP32[$43>>2]|0;HEAP32[$$byval_copy1+4>>2]=HEAP32[$43+4>>2]|0;HEAP32[$$byval_copy1+8>>2]=HEAP32[$43+8>>2]|0; //@line 145 "../../src/imu/imu.c"
- _v3_sub_11($9,$$byval_copy,$$byval_copy1); //@line 145 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy2>>2]=HEAP32[$41>>2]|0;HEAP32[$$byval_copy2+4>>2]=HEAP32[$41+4>>2]|0;HEAP32[$$byval_copy2+8>>2]=HEAP32[$41+8>>2]|0; //@line 145 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy3>>2]=HEAP32[$9>>2]|0;HEAP32[$$byval_copy3+4>>2]=HEAP32[$9+4>>2]|0;HEAP32[$$byval_copy3+8>>2]=HEAP32[$9+8>>2]|0; //@line 145 "../../src/imu/imu.c"
- _v3_mul($8,$$byval_copy2,$$byval_copy3); //@line 145 "../../src/imu/imu.c"
- $44 = $4; //@line 148 "../../src/imu/imu.c"
- $45 = ((($44)) + 1216|0); //@line 148 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy4>>2]=HEAP32[$45>>2]|0;HEAP32[$$byval_copy4+4>>2]=HEAP32[$45+4>>2]|0;HEAP32[$$byval_copy4+8>>2]=HEAP32[$45+8>>2]|0; //@line 148 "../../src/imu/imu.c"
- _quaternion_from_hpr($11,$$byval_copy4); //@line 148 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy5>>2]=HEAP32[$11>>2]|0;HEAP32[$$byval_copy5+4>>2]=HEAP32[$11+4>>2]|0;HEAP32[$$byval_copy5+8>>2]=HEAP32[$11+8>>2]|0;HEAP32[$$byval_copy5+12>>2]=HEAP32[$11+12>>2]|0; //@line 148 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy6>>2]=HEAP32[$8>>2]|0;HEAP32[$$byval_copy6+4>>2]=HEAP32[$8+4>>2]|0;HEAP32[$$byval_copy6+8>>2]=HEAP32[$8+8>>2]|0; //@line 148 "../../src/imu/imu.c"
- _quaternion_rotate_vec3($$byval_copy5,$$byval_copy6,$10); //@line 148 "../../src/imu/imu.c"
- $46 = $4; //@line 150 "../../src/imu/imu.c"
- $47 = ((($46)) + 40|0); //@line 150 "../../src/imu/imu.c"
- ;HEAP32[$12>>2]=HEAP32[$47>>2]|0;HEAP32[$12+4>>2]=HEAP32[$47+4>>2]|0;HEAP32[$12+8>>2]=HEAP32[$47+8>>2]|0; //@line 150 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy7>>2]=HEAP32[$12>>2]|0;HEAP32[$$byval_copy7+4>>2]=HEAP32[$12+4>>2]|0;HEAP32[$$byval_copy7+8>>2]=HEAP32[$12+8>>2]|0; //@line 152 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy8>>2]=HEAP32[$10>>2]|0;HEAP32[$$byval_copy8+4>>2]=HEAP32[$10+4>>2]|0;HEAP32[$$byval_copy8+8>>2]=HEAP32[$10+8>>2]|0; //@line 152 "../../src/imu/imu.c"
- _v3_cross_17($14,$$byval_copy7,$$byval_copy8); //@line 152 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy9>>2]=HEAP32[$14>>2]|0;HEAP32[$$byval_copy9+4>>2]=HEAP32[$14+4>>2]|0;HEAP32[$$byval_copy9+8>>2]=HEAP32[$14+8>>2]|0; //@line 152 "../../src/imu/imu.c"
- _v3_norm_15($13,$$byval_copy9); //@line 152 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy10>>2]=HEAP32[$13>>2]|0;HEAP32[$$byval_copy10+4>>2]=HEAP32[$13+4>>2]|0;HEAP32[$$byval_copy10+8>>2]=HEAP32[$13+8>>2]|0; //@line 154 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy11>>2]=HEAP32[$12>>2]|0;HEAP32[$$byval_copy11+4>>2]=HEAP32[$12+4>>2]|0;HEAP32[$$byval_copy11+8>>2]=HEAP32[$12+8>>2]|0; //@line 154 "../../src/imu/imu.c"
- _v3_cross_17($16,$$byval_copy10,$$byval_copy11); //@line 154 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy12>>2]=HEAP32[$16>>2]|0;HEAP32[$$byval_copy12+4>>2]=HEAP32[$16+4>>2]|0;HEAP32[$$byval_copy12+8>>2]=HEAP32[$16+8>>2]|0; //@line 154 "../../src/imu/imu.c"
- _v3_norm_15($15,$$byval_copy12); //@line 154 "../../src/imu/imu.c"
- $48 = +HEAPF32[$15>>2]; //@line 156 "../../src/imu/imu.c"
- $49 = $48; //@line 156 "../../src/imu/imu.c"
- $50 = ((($15)) + 4|0); //@line 156 "../../src/imu/imu.c"
- $51 = +HEAPF32[$50>>2]; //@line 156 "../../src/imu/imu.c"
- $52 = $51; //@line 156 "../../src/imu/imu.c"
- $53 = (+Math_atan2((+$49),(+$52))); //@line 156 "../../src/imu/imu.c"
- $54 = $53; //@line 156 "../../src/imu/imu.c"
- $55 = (+_radians_to_degrees($54)); //@line 156 "../../src/imu/imu.c"
- $56 = -90.0 + $55; //@line 156 "../../src/imu/imu.c"
- $17 = $56; //@line 156 "../../src/imu/imu.c"
- $57 = ((($12)) + 4|0); //@line 157 "../../src/imu/imu.c"
- $58 = +HEAPF32[$57>>2]; //@line 157 "../../src/imu/imu.c"
- $59 = $58; //@line 157 "../../src/imu/imu.c"
- $60 = +HEAPF32[$12>>2]; //@line 157 "../../src/imu/imu.c"
- $61 = +HEAPF32[$12>>2]; //@line 157 "../../src/imu/imu.c"
- $62 = $60 * $61; //@line 157 "../../src/imu/imu.c"
- $63 = ((($12)) + 8|0); //@line 157 "../../src/imu/imu.c"
- $64 = +HEAPF32[$63>>2]; //@line 157 "../../src/imu/imu.c"
- $65 = ((($12)) + 8|0); //@line 157 "../../src/imu/imu.c"
- $66 = +HEAPF32[$65>>2]; //@line 157 "../../src/imu/imu.c"
- $67 = $64 * $66; //@line 157 "../../src/imu/imu.c"
- $68 = $62 + $67; //@line 157 "../../src/imu/imu.c"
- $69 = $68; //@line 157 "../../src/imu/imu.c"
- $70 = (+Math_sqrt((+$69))); //@line 157 "../../src/imu/imu.c"
- $71 = (+Math_atan2((+$59),(+$70))); //@line 157 "../../src/imu/imu.c"
- $72 = $71 * 180.0; //@line 157 "../../src/imu/imu.c"
- $73 = $72 / 3.1415926535897931; //@line 157 "../../src/imu/imu.c"
- $74 = $73; //@line 157 "../../src/imu/imu.c"
- $18 = $74; //@line 157 "../../src/imu/imu.c"
- $75 = +HEAPF32[$12>>2]; //@line 158 "../../src/imu/imu.c"
- $76 = - $75; //@line 158 "../../src/imu/imu.c"
- $77 = $76; //@line 158 "../../src/imu/imu.c"
- $78 = ((($12)) + 4|0); //@line 158 "../../src/imu/imu.c"
- $79 = +HEAPF32[$78>>2]; //@line 158 "../../src/imu/imu.c"
- $80 = ((($12)) + 4|0); //@line 158 "../../src/imu/imu.c"
- $81 = +HEAPF32[$80>>2]; //@line 158 "../../src/imu/imu.c"
- $82 = $79 * $81; //@line 158 "../../src/imu/imu.c"
- $83 = ((($12)) + 8|0); //@line 158 "../../src/imu/imu.c"
- $84 = +HEAPF32[$83>>2]; //@line 158 "../../src/imu/imu.c"
- $85 = ((($12)) + 8|0); //@line 158 "../../src/imu/imu.c"
- $86 = +HEAPF32[$85>>2]; //@line 158 "../../src/imu/imu.c"
- $87 = $84 * $86; //@line 158 "../../src/imu/imu.c"
- $88 = $82 + $87; //@line 158 "../../src/imu/imu.c"
- $89 = $88; //@line 158 "../../src/imu/imu.c"
- $90 = (+Math_sqrt((+$89))); //@line 158 "../../src/imu/imu.c"
- $91 = (+Math_atan2((+$77),(+$90))); //@line 158 "../../src/imu/imu.c"
- $92 = $91 * 180.0; //@line 158 "../../src/imu/imu.c"
- $93 = $92 / 3.1415926535897931; //@line 158 "../../src/imu/imu.c"
- $94 = $93; //@line 158 "../../src/imu/imu.c"
- $19 = $94; //@line 158 "../../src/imu/imu.c"
- $95 = $17; //@line 159 "../../src/imu/imu.c"
- $96 = $19; //@line 159 "../../src/imu/imu.c"
- $97 = $18; //@line 159 "../../src/imu/imu.c"
- _vec3_10($20,$95,$96,$97); //@line 159 "../../src/imu/imu.c"
- $98 = $4; //@line 160 "../../src/imu/imu.c"
- $99 = ((($98)) + 1376|0); //@line 160 "../../src/imu/imu.c"
- $100 = ((($99)) + 24|0); //@line 160 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy13>>2]=HEAP32[$100>>2]|0;HEAP32[$$byval_copy13+4>>2]=HEAP32[$100+4>>2]|0;HEAP32[$$byval_copy13+8>>2]=HEAP32[$100+8>>2]|0;HEAP32[$$byval_copy13+12>>2]=HEAP32[$100+12>>2]|0; //@line 160 "../../src/imu/imu.c"
- _heading_pitch_roll_from_quaternion($21,$$byval_copy13); //@line 160 "../../src/imu/imu.c"
- $101 = $4; //@line 162 "../../src/imu/imu.c"
- $102 = ((($101)) + 1440|0); //@line 162 "../../src/imu/imu.c"
- $103 = ((($102)) + 24|0); //@line 162 "../../src/imu/imu.c"
- $104 = +HEAPF32[$20>>2]; //@line 162 "../../src/imu/imu.c"
- $105 = ((($20)) + 4|0); //@line 162 "../../src/imu/imu.c"
- $106 = +HEAPF32[$105>>2]; //@line 162 "../../src/imu/imu.c"
- $107 = ((($20)) + 8|0); //@line 162 "../../src/imu/imu.c"
- $108 = +HEAPF32[$107>>2]; //@line 162 "../../src/imu/imu.c"
- _quaternion_from_heading_pitch_roll($22,$104,$106,$108); //@line 162 "../../src/imu/imu.c"
- $109 = $4; //@line 162 "../../src/imu/imu.c"
- $110 = ((($109)) + 1312|0); //@line 162 "../../src/imu/imu.c"
- $111 = ((($110)) + 24|0); //@line 162 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy14>>2]=HEAP32[$22>>2]|0;HEAP32[$$byval_copy14+4>>2]=HEAP32[$22+4>>2]|0;HEAP32[$$byval_copy14+8>>2]=HEAP32[$22+8>>2]|0;HEAP32[$$byval_copy14+12>>2]=HEAP32[$22+12>>2]|0; //@line 162 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy15>>2]=HEAP32[$111>>2]|0;HEAP32[$$byval_copy15+4>>2]=HEAP32[$111+4>>2]|0;HEAP32[$$byval_copy15+8>>2]=HEAP32[$111+8>>2]|0;HEAP32[$$byval_copy15+12>>2]=HEAP32[$111+12>>2]|0; //@line 162 "../../src/imu/imu.c"
- _quaternion_set_sign_like_example($23,$$byval_copy14,$$byval_copy15); //@line 162 "../../src/imu/imu.c"
- ;HEAP32[$103>>2]=HEAP32[$23>>2]|0;HEAP32[$103+4>>2]=HEAP32[$23+4>>2]|0;HEAP32[$103+8>>2]=HEAP32[$23+8>>2]|0;HEAP32[$103+12>>2]=HEAP32[$23+12>>2]|0; //@line 162 "../../src/imu/imu.c"
- $112 = +HEAPF64[$1>>3]; //@line 165 "../../src/imu/imu.c"
- $113 = $5; //@line 165 "../../src/imu/imu.c"
- $114 = $6; //@line 165 "../../src/imu/imu.c"
- $115 = HEAP32[$114>>2]|0; //@line 165 "../../src/imu/imu.c"
- $116 = (($113) + (($115*144)|0)|0); //@line 165 "../../src/imu/imu.c"
- HEAPF64[$116>>3] = $112; //@line 165 "../../src/imu/imu.c"
- $117 = $5; //@line 166 "../../src/imu/imu.c"
- $118 = $6; //@line 166 "../../src/imu/imu.c"
- $119 = HEAP32[$118>>2]|0; //@line 166 "../../src/imu/imu.c"
- $120 = (($117) + (($119*144)|0)|0); //@line 166 "../../src/imu/imu.c"
- $121 = ((($120)) + 8|0); //@line 166 "../../src/imu/imu.c"
- HEAP32[$121>>2] = 2001; //@line 166 "../../src/imu/imu.c"
- $24 = 0; //@line 167 "../../src/imu/imu.c"
- $122 = $4; //@line 168 "../../src/imu/imu.c"
- $123 = ((($122)) + 1440|0); //@line 168 "../../src/imu/imu.c"
- $124 = ((($123)) + 24|0); //@line 168 "../../src/imu/imu.c"
- $125 = $4; //@line 168 "../../src/imu/imu.c"
- $126 = ((($125)) + 1376|0); //@line 168 "../../src/imu/imu.c"
- $127 = ((($126)) + 24|0); //@line 168 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy16>>2]=HEAP32[$124>>2]|0;HEAP32[$$byval_copy16+4>>2]=HEAP32[$124+4>>2]|0;HEAP32[$$byval_copy16+8>>2]=HEAP32[$124+8>>2]|0;HEAP32[$$byval_copy16+12>>2]=HEAP32[$124+12>>2]|0; //@line 168 "../../src/imu/imu.c"
- ;HEAP32[$$byval_copy17>>2]=HEAP32[$127>>2]|0;HEAP32[$$byval_copy17+4>>2]=HEAP32[$127+4>>2]|0;HEAP32[$$byval_copy17+8>>2]=HEAP32[$127+8>>2]|0;HEAP32[$$byval_copy17+12>>2]=HEAP32[$127+12>>2]|0; //@line 168 "../../src/imu/imu.c"
- $128 = (+_compare_pitch_and_roll($$byval_copy16,$$byval_copy17)); //@line 168 "../../src/imu/imu.c"
- $129 = $128; //@line 168 "../../src/imu/imu.c"
- $130 = $5; //@line 168 "../../src/imu/imu.c"
- $131 = $6; //@line 168 "../../src/imu/imu.c"
- $132 = HEAP32[$131>>2]|0; //@line 168 "../../src/imu/imu.c"
- $133 = (($130) + (($132*144)|0)|0); //@line 168 "../../src/imu/imu.c"
- $134 = ((($133)) + 16|0); //@line 168 "../../src/imu/imu.c"
- $135 = $24; //@line 168 "../../src/imu/imu.c"
- $136 = (($135) + 1)|0; //@line 168 "../../src/imu/imu.c"
- $24 = $136; //@line 168 "../../src/imu/imu.c"
- $137 = (($134) + ($135<<3)|0); //@line 168 "../../src/imu/imu.c"
- HEAPF64[$137>>3] = $129; //@line 168 "../../src/imu/imu.c"
- $138 = +HEAPF32[$20>>2]; //@line 169 "../../src/imu/imu.c"
- $139 = $138; //@line 169 "../../src/imu/imu.c"
- $140 = $5; //@line 169 "../../src/imu/imu.c"
- $141 = $6; //@line 169 "../../src/imu/imu.c"
- $142 = HEAP32[$141>>2]|0; //@line 169 "../../src/imu/imu.c"
- $143 = (($140) + (($142*144)|0)|0); //@line 169 "../../src/imu/imu.c"
- $144 = ((($143)) + 16|0); //@line 169 "../../src/imu/imu.c"
- $145 = $24; //@line 169 "../../src/imu/imu.c"
- $146 = (($145) + 1)|0; //@line 169 "../../src/imu/imu.c"
- $24 = $146; //@line 169 "../../src/imu/imu.c"
- $147 = (($144) + ($145<<3)|0); //@line 169 "../../src/imu/imu.c"
- HEAPF64[$147>>3] = $139; //@line 169 "../../src/imu/imu.c"
- $148 = ((($20)) + 4|0); //@line 170 "../../src/imu/imu.c"
- $149 = +HEAPF32[$148>>2]; //@line 170 "../../src/imu/imu.c"
- $150 = $149; //@line 170 "../../src/imu/imu.c"
- $151 = $5; //@line 170 "../../src/imu/imu.c"
- $152 = $6; //@line 170 "../../src/imu/imu.c"
- $153 = HEAP32[$152>>2]|0; //@line 170 "../../src/imu/imu.c"
- $154 = (($151) + (($153*144)|0)|0); //@line 170 "../../src/imu/imu.c"
- $155 = ((($154)) + 16|0); //@line 170 "../../src/imu/imu.c"
- $156 = $24; //@line 170 "../../src/imu/imu.c"
- $157 = (($156) + 1)|0; //@line 170 "../../src/imu/imu.c"
- $24 = $157; //@line 170 "../../src/imu/imu.c"
- $158 = (($155) + ($156<<3)|0); //@line 170 "../../src/imu/imu.c"
- HEAPF64[$158>>3] = $150; //@line 170 "../../src/imu/imu.c"
- $159 = ((($20)) + 8|0); //@line 171 "../../src/imu/imu.c"
- $160 = +HEAPF32[$159>>2]; //@line 171 "../../src/imu/imu.c"
- $161 = $160; //@line 171 "../../src/imu/imu.c"
- $162 = $5; //@line 171 "../../src/imu/imu.c"
- $163 = $6; //@line 171 "../../src/imu/imu.c"
- $164 = HEAP32[$163>>2]|0; //@line 171 "../../src/imu/imu.c"
- $165 = (($162) + (($164*144)|0)|0); //@line 171 "../../src/imu/imu.c"
- $166 = ((($165)) + 16|0); //@line 171 "../../src/imu/imu.c"
- $167 = $24; //@line 171 "../../src/imu/imu.c"
- $168 = (($167) + 1)|0; //@line 171 "../../src/imu/imu.c"
- $24 = $168; //@line 171 "../../src/imu/imu.c"
- $169 = (($166) + ($167<<3)|0); //@line 171 "../../src/imu/imu.c"
- HEAPF64[$169>>3] = $161; //@line 171 "../../src/imu/imu.c"
- $170 = +HEAPF32[$21>>2]; //@line 172 "../../src/imu/imu.c"
- $171 = $170; //@line 172 "../../src/imu/imu.c"
- $172 = $5; //@line 172 "../../src/imu/imu.c"
- $173 = $6; //@line 172 "../../src/imu/imu.c"
- $174 = HEAP32[$173>>2]|0; //@line 172 "../../src/imu/imu.c"
- $175 = (($172) + (($174*144)|0)|0); //@line 172 "../../src/imu/imu.c"
- $176 = ((($175)) + 16|0); //@line 172 "../../src/imu/imu.c"
- $177 = $24; //@line 172 "../../src/imu/imu.c"
- $178 = (($177) + 1)|0; //@line 172 "../../src/imu/imu.c"
- $24 = $178; //@line 172 "../../src/imu/imu.c"
- $179 = (($176) + ($177<<3)|0); //@line 172 "../../src/imu/imu.c"
- HEAPF64[$179>>3] = $171; //@line 172 "../../src/imu/imu.c"
- $180 = ((($21)) + 4|0); //@line 173 "../../src/imu/imu.c"
- $181 = +HEAPF32[$180>>2]; //@line 173 "../../src/imu/imu.c"
- $182 = $181; //@line 173 "../../src/imu/imu.c"
- $183 = $5; //@line 173 "../../src/imu/imu.c"
- $184 = $6; //@line 173 "../../src/imu/imu.c"
- $185 = HEAP32[$184>>2]|0; //@line 173 "../../src/imu/imu.c"
- $186 = (($183) + (($185*144)|0)|0); //@line 173 "../../src/imu/imu.c"
- $187 = ((($186)) + 16|0); //@line 173 "../../src/imu/imu.c"
- $188 = $24; //@line 173 "../../src/imu/imu.c"
- $189 = (($188) + 1)|0; //@line 173 "../../src/imu/imu.c"
- $24 = $189; //@line 173 "../../src/imu/imu.c"
- $190 = (($187) + ($188<<3)|0); //@line 173 "../../src/imu/imu.c"
- HEAPF64[$190>>3] = $182; //@line 173 "../../src/imu/imu.c"
- $191 = ((($21)) + 8|0); //@line 174 "../../src/imu/imu.c"
- $192 = +HEAPF32[$191>>2]; //@line 174 "../../src/imu/imu.c"
- $193 = $192; //@line 174 "../../src/imu/imu.c"
- $194 = $5; //@line 174 "../../src/imu/imu.c"
- $195 = $6; //@line 174 "../../src/imu/imu.c"
- $196 = HEAP32[$195>>2]|0; //@line 174 "../../src/imu/imu.c"
- $197 = (($194) + (($196*144)|0)|0); //@line 174 "../../src/imu/imu.c"
- $198 = ((($197)) + 16|0); //@line 174 "../../src/imu/imu.c"
- $199 = $24; //@line 174 "../../src/imu/imu.c"
- $200 = (($199) + 1)|0; //@line 174 "../../src/imu/imu.c"
- $24 = $200; //@line 174 "../../src/imu/imu.c"
- $201 = (($198) + ($199<<3)|0); //@line 174 "../../src/imu/imu.c"
- HEAPF64[$201>>3] = $193; //@line 174 "../../src/imu/imu.c"
- $202 = $24; //@line 175 "../../src/imu/imu.c"
- $203 = $5; //@line 175 "../../src/imu/imu.c"
- $204 = $6; //@line 175 "../../src/imu/imu.c"
- $205 = HEAP32[$204>>2]|0; //@line 175 "../../src/imu/imu.c"
- $206 = (($203) + (($205*144)|0)|0); //@line 175 "../../src/imu/imu.c"
- $207 = ((($206)) + 12|0); //@line 175 "../../src/imu/imu.c"
- HEAP32[$207>>2] = $202; //@line 175 "../../src/imu/imu.c"
- $208 = $6; //@line 176 "../../src/imu/imu.c"
- $209 = HEAP32[$208>>2]|0; //@line 176 "../../src/imu/imu.c"
- $210 = (($209) + 1)|0; //@line 176 "../../src/imu/imu.c"
- HEAP32[$208>>2] = $210; //@line 176 "../../src/imu/imu.c"
- $211 = $4; //@line 179 "../../src/imu/imu.c"
- $212 = ((($211)) + 1168|0); //@line 179 "../../src/imu/imu.c"
- $213 = +HEAPF64[$212>>3]; //@line 179 "../../src/imu/imu.c"
- $214 = $213 == 0.0; //@line 179 "../../src/imu/imu.c"
- if ($214) {
-  $215 = $4; //@line 182 "../../src/imu/imu.c"
-  $216 = ((($215)) + 1312|0); //@line 182 "../../src/imu/imu.c"
-  $217 = ((($216)) + 24|0); //@line 182 "../../src/imu/imu.c"
-  $218 = $4; //@line 182 "../../src/imu/imu.c"
-  $219 = ((($218)) + 1440|0); //@line 182 "../../src/imu/imu.c"
-  $220 = ((($219)) + 24|0); //@line 182 "../../src/imu/imu.c"
-  ;HEAP32[$217>>2]=HEAP32[$220>>2]|0;HEAP32[$217+4>>2]=HEAP32[$220+4>>2]|0;HEAP32[$217+8>>2]=HEAP32[$220+8>>2]|0;HEAP32[$217+12>>2]=HEAP32[$220+12>>2]|0; //@line 182 "../../src/imu/imu.c"
-  $221 = $4; //@line 185 "../../src/imu/imu.c"
-  $222 = ((($221)) + 1312|0); //@line 185 "../../src/imu/imu.c"
-  $223 = ((($222)) + 24|0); //@line 185 "../../src/imu/imu.c"
-  $224 = ((($223)) + 4|0); //@line 185 "../../src/imu/imu.c"
-  $225 = +HEAPF32[$224>>2]; //@line 185 "../../src/imu/imu.c"
-  $226 = $225; //@line 185 "../../src/imu/imu.c"
-  HEAPF64[$25>>3] = $226; //@line 185 "../../src/imu/imu.c"
-  $227 = $4; //@line 186 "../../src/imu/imu.c"
-  $228 = ((($227)) + 1312|0); //@line 186 "../../src/imu/imu.c"
-  $229 = ((($228)) + 24|0); //@line 186 "../../src/imu/imu.c"
-  $230 = ((($229)) + 8|0); //@line 186 "../../src/imu/imu.c"
-  $231 = +HEAPF32[$230>>2]; //@line 186 "../../src/imu/imu.c"
-  $232 = $231; //@line 186 "../../src/imu/imu.c"
-  $233 = ((($25)) + 8|0); //@line 186 "../../src/imu/imu.c"
-  HEAPF64[$233>>3] = $232; //@line 186 "../../src/imu/imu.c"
-  $234 = $4; //@line 187 "../../src/imu/imu.c"
-  $235 = ((($234)) + 1312|0); //@line 187 "../../src/imu/imu.c"
-  $236 = ((($235)) + 24|0); //@line 187 "../../src/imu/imu.c"
-  $237 = ((($236)) + 12|0); //@line 187 "../../src/imu/imu.c"
-  $238 = +HEAPF32[$237>>2]; //@line 187 "../../src/imu/imu.c"
-  $239 = $238; //@line 187 "../../src/imu/imu.c"
-  $240 = ((($25)) + 16|0); //@line 187 "../../src/imu/imu.c"
-  HEAPF64[$240>>3] = $239; //@line 187 "../../src/imu/imu.c"
-  $241 = $4; //@line 188 "../../src/imu/imu.c"
-  $242 = ((($241)) + 56|0); //@line 188 "../../src/imu/imu.c"
-  $243 = $4; //@line 188 "../../src/imu/imu.c"
-  $244 = ((($243)) + 1176|0); //@line 188 "../../src/imu/imu.c"
-  $245 = +HEAPF64[$244>>3]; //@line 188 "../../src/imu/imu.c"
-  _imu_ekf_init($242,$245,$25); //@line 188 "../../src/imu/imu.c"
-  $246 = +HEAPF64[$1>>3]; //@line 189 "../../src/imu/imu.c"
-  $247 = $4; //@line 189 "../../src/imu/imu.c"
-  $248 = ((($247)) + 1168|0); //@line 189 "../../src/imu/imu.c"
-  HEAPF64[$248>>3] = $246; //@line 189 "../../src/imu/imu.c"
- }
- $249 = +HEAPF64[$1>>3]; //@line 192 "../../src/imu/imu.c"
- $250 = $4; //@line 192 "../../src/imu/imu.c"
- $251 = ((($250)) + 1168|0); //@line 192 "../../src/imu/imu.c"
- $252 = +HEAPF64[$251>>3]; //@line 192 "../../src/imu/imu.c"
- $253 = $249 - $252; //@line 192 "../../src/imu/imu.c"
- $254 = $4; //@line 192 "../../src/imu/imu.c"
- $255 = ((($254)) + 1184|0); //@line 192 "../../src/imu/imu.c"
- $256 = +HEAPF64[$255>>3]; //@line 192 "../../src/imu/imu.c"
- $257 = 1000.0 * $256; //@line 192 "../../src/imu/imu.c"
- $258 = $253 > $257; //@line 192 "../../src/imu/imu.c"
- if ($258) {
-  $259 = +HEAPF64[$1>>3]; //@line 194 "../../src/imu/imu.c"
-  $260 = $4; //@line 194 "../../src/imu/imu.c"
-  $261 = ((($260)) + 1168|0); //@line 194 "../../src/imu/imu.c"
-  HEAPF64[$261>>3] = $259; //@line 194 "../../src/imu/imu.c"
-  $262 = $4; //@line 196 "../../src/imu/imu.c"
-  $263 = ((($262)) + 1440|0); //@line 196 "../../src/imu/imu.c"
-  $264 = ((($263)) + 24|0); //@line 196 "../../src/imu/imu.c"
-  $265 = ((($264)) + 4|0); //@line 196 "../../src/imu/imu.c"
-  $266 = +HEAPF32[$265>>2]; //@line 196 "../../src/imu/imu.c"
-  $267 = $266; //@line 196 "../../src/imu/imu.c"
-  HEAPF64[$26>>3] = $267; //@line 196 "../../src/imu/imu.c"
-  $268 = $4; //@line 197 "../../src/imu/imu.c"
-  $269 = ((($268)) + 1440|0); //@line 197 "../../src/imu/imu.c"
-  $270 = ((($269)) + 24|0); //@line 197 "../../src/imu/imu.c"
-  $271 = ((($270)) + 8|0); //@line 197 "../../src/imu/imu.c"
-  $272 = +HEAPF32[$271>>2]; //@line 197 "../../src/imu/imu.c"
-  $273 = $272; //@line 197 "../../src/imu/imu.c"
-  $274 = ((($26)) + 8|0); //@line 197 "../../src/imu/imu.c"
-  HEAPF64[$274>>3] = $273; //@line 197 "../../src/imu/imu.c"
-  $275 = $4; //@line 198 "../../src/imu/imu.c"
-  $276 = ((($275)) + 1440|0); //@line 198 "../../src/imu/imu.c"
-  $277 = ((($276)) + 24|0); //@line 198 "../../src/imu/imu.c"
-  $278 = ((($277)) + 12|0); //@line 198 "../../src/imu/imu.c"
-  $279 = +HEAPF32[$278>>2]; //@line 198 "../../src/imu/imu.c"
-  $280 = $279; //@line 198 "../../src/imu/imu.c"
-  $281 = ((($26)) + 16|0); //@line 198 "../../src/imu/imu.c"
-  HEAPF64[$281>>3] = $280; //@line 198 "../../src/imu/imu.c"
-  $282 = $4; //@line 203 "../../src/imu/imu.c"
-  $283 = ((($282)) + 56|0); //@line 203 "../../src/imu/imu.c"
-  (_imu_ekf_update($283,$26)|0); //@line 203 "../../src/imu/imu.c"
-  $284 = +HEAPF64[$1>>3]; //@line 204 "../../src/imu/imu.c"
-  $285 = $5; //@line 204 "../../src/imu/imu.c"
-  $286 = $6; //@line 204 "../../src/imu/imu.c"
-  $287 = HEAP32[$286>>2]|0; //@line 204 "../../src/imu/imu.c"
-  $288 = (($285) + (($287*144)|0)|0); //@line 204 "../../src/imu/imu.c"
-  HEAPF64[$288>>3] = $284; //@line 204 "../../src/imu/imu.c"
-  $289 = $5; //@line 205 "../../src/imu/imu.c"
-  $290 = $6; //@line 205 "../../src/imu/imu.c"
-  $291 = HEAP32[$290>>2]|0; //@line 205 "../../src/imu/imu.c"
-  $292 = (($289) + (($291*144)|0)|0); //@line 205 "../../src/imu/imu.c"
-  $293 = ((($292)) + 8|0); //@line 205 "../../src/imu/imu.c"
-  HEAP32[$293>>2] = 2002; //@line 205 "../../src/imu/imu.c"
-  $24 = 0; //@line 206 "../../src/imu/imu.c"
-  $294 = $4; //@line 207 "../../src/imu/imu.c"
-  $295 = ((($294)) + 1440|0); //@line 207 "../../src/imu/imu.c"
-  $296 = ((($295)) + 24|0); //@line 207 "../../src/imu/imu.c"
-  $297 = $4; //@line 207 "../../src/imu/imu.c"
-  $298 = ((($297)) + 1312|0); //@line 207 "../../src/imu/imu.c"
-  $299 = ((($298)) + 24|0); //@line 207 "../../src/imu/imu.c"
-  ;HEAP32[$$byval_copy18>>2]=HEAP32[$299>>2]|0;HEAP32[$$byval_copy18+4>>2]=HEAP32[$299+4>>2]|0;HEAP32[$$byval_copy18+8>>2]=HEAP32[$299+8>>2]|0;HEAP32[$$byval_copy18+12>>2]=HEAP32[$299+12>>2]|0; //@line 207 "../../src/imu/imu.c"
-  _quaternion_inverse($28,$$byval_copy18); //@line 207 "../../src/imu/imu.c"
-  ;HEAP32[$$byval_copy19>>2]=HEAP32[$296>>2]|0;HEAP32[$$byval_copy19+4>>2]=HEAP32[$296+4>>2]|0;HEAP32[$$byval_copy19+8>>2]=HEAP32[$296+8>>2]|0;HEAP32[$$byval_copy19+12>>2]=HEAP32[$296+12>>2]|0; //@line 207 "../../src/imu/imu.c"
-  ;HEAP32[$$byval_copy20>>2]=HEAP32[$28>>2]|0;HEAP32[$$byval_copy20+4>>2]=HEAP32[$28+4>>2]|0;HEAP32[$$byval_copy20+8>>2]=HEAP32[$28+8>>2]|0;HEAP32[$$byval_copy20+12>>2]=HEAP32[$28+12>>2]|0; //@line 207 "../../src/imu/imu.c"
-  _quaternion_multiply_14($27,$$byval_copy19,$$byval_copy20); //@line 207 "../../src/imu/imu.c"
-  ;HEAP32[$$byval_copy21>>2]=HEAP32[$27>>2]|0;HEAP32[$$byval_copy21+4>>2]=HEAP32[$27+4>>2]|0;HEAP32[$$byval_copy21+8>>2]=HEAP32[$27+8>>2]|0;HEAP32[$$byval_copy21+12>>2]=HEAP32[$27+12>>2]|0; //@line 207 "../../src/imu/imu.c"
-  $300 = (+_quaternion_angle($$byval_copy21)); //@line 207 "../../src/imu/imu.c"
-  $301 = $300; //@line 207 "../../src/imu/imu.c"
-  $302 = $5; //@line 207 "../../src/imu/imu.c"
-  $303 = $6; //@line 207 "../../src/imu/imu.c"
-  $304 = HEAP32[$303>>2]|0; //@line 207 "../../src/imu/imu.c"
-  $305 = (($302) + (($304*144)|0)|0); //@line 207 "../../src/imu/imu.c"
-  $306 = ((($305)) + 16|0); //@line 207 "../../src/imu/imu.c"
-  $307 = $24; //@line 207 "../../src/imu/imu.c"
-  $308 = (($307) + 1)|0; //@line 207 "../../src/imu/imu.c"
-  $24 = $308; //@line 207 "../../src/imu/imu.c"
-  $309 = (($306) + ($307<<3)|0); //@line 207 "../../src/imu/imu.c"
-  HEAPF64[$309>>3] = $301; //@line 207 "../../src/imu/imu.c"
-  $310 = $4; //@line 208 "../../src/imu/imu.c"
-  $311 = ((($310)) + 1440|0); //@line 208 "../../src/imu/imu.c"
-  $312 = ((($311)) + 24|0); //@line 208 "../../src/imu/imu.c"
-  $313 = ((($312)) + 4|0); //@line 208 "../../src/imu/imu.c"
-  $314 = +HEAPF32[$313>>2]; //@line 208 "../../src/imu/imu.c"
-  $315 = $314; //@line 208 "../../src/imu/imu.c"
-  $316 = $5; //@line 208 "../../src/imu/imu.c"
-  $317 = $6; //@line 208 "../../src/imu/imu.c"
-  $318 = HEAP32[$317>>2]|0; //@line 208 "../../src/imu/imu.c"
-  $319 = (($316) + (($318*144)|0)|0); //@line 208 "../../src/imu/imu.c"
-  $320 = ((($319)) + 16|0); //@line 208 "../../src/imu/imu.c"
-  $321 = $24; //@line 208 "../../src/imu/imu.c"
-  $322 = (($321) + 1)|0; //@line 208 "../../src/imu/imu.c"
-  $24 = $322; //@line 208 "../../src/imu/imu.c"
-  $323 = (($320) + ($321<<3)|0); //@line 208 "../../src/imu/imu.c"
-  HEAPF64[$323>>3] = $315; //@line 208 "../../src/imu/imu.c"
-  $324 = $4; //@line 209 "../../src/imu/imu.c"
-  $325 = ((($324)) + 1440|0); //@line 209 "../../src/imu/imu.c"
-  $326 = ((($325)) + 24|0); //@line 209 "../../src/imu/imu.c"
-  $327 = ((($326)) + 8|0); //@line 209 "../../src/imu/imu.c"
-  $328 = +HEAPF32[$327>>2]; //@line 209 "../../src/imu/imu.c"
-  $329 = $328; //@line 209 "../../src/imu/imu.c"
-  $330 = $5; //@line 209 "../../src/imu/imu.c"
-  $331 = $6; //@line 209 "../../src/imu/imu.c"
-  $332 = HEAP32[$331>>2]|0; //@line 209 "../../src/imu/imu.c"
-  $333 = (($330) + (($332*144)|0)|0); //@line 209 "../../src/imu/imu.c"
-  $334 = ((($333)) + 16|0); //@line 209 "../../src/imu/imu.c"
-  $335 = $24; //@line 209 "../../src/imu/imu.c"
-  $336 = (($335) + 1)|0; //@line 209 "../../src/imu/imu.c"
-  $24 = $336; //@line 209 "../../src/imu/imu.c"
-  $337 = (($334) + ($335<<3)|0); //@line 209 "../../src/imu/imu.c"
-  HEAPF64[$337>>3] = $329; //@line 209 "../../src/imu/imu.c"
-  $338 = $4; //@line 210 "../../src/imu/imu.c"
-  $339 = ((($338)) + 1440|0); //@line 210 "../../src/imu/imu.c"
-  $340 = ((($339)) + 24|0); //@line 210 "../../src/imu/imu.c"
-  $341 = ((($340)) + 12|0); //@line 210 "../../src/imu/imu.c"
-  $342 = +HEAPF32[$341>>2]; //@line 210 "../../src/imu/imu.c"
-  $343 = $342; //@line 210 "../../src/imu/imu.c"
-  $344 = $5; //@line 210 "../../src/imu/imu.c"
-  $345 = $6; //@line 210 "../../src/imu/imu.c"
-  $346 = HEAP32[$345>>2]|0; //@line 210 "../../src/imu/imu.c"
-  $347 = (($344) + (($346*144)|0)|0); //@line 210 "../../src/imu/imu.c"
-  $348 = ((($347)) + 16|0); //@line 210 "../../src/imu/imu.c"
-  $349 = $24; //@line 210 "../../src/imu/imu.c"
-  $350 = (($349) + 1)|0; //@line 210 "../../src/imu/imu.c"
-  $24 = $350; //@line 210 "../../src/imu/imu.c"
-  $351 = (($348) + ($349<<3)|0); //@line 210 "../../src/imu/imu.c"
-  HEAPF64[$351>>3] = $343; //@line 210 "../../src/imu/imu.c"
-  $352 = $4; //@line 211 "../../src/imu/imu.c"
-  $353 = ((($352)) + 1312|0); //@line 211 "../../src/imu/imu.c"
-  $354 = ((($353)) + 24|0); //@line 211 "../../src/imu/imu.c"
-  $355 = ((($354)) + 4|0); //@line 211 "../../src/imu/imu.c"
-  $356 = +HEAPF32[$355>>2]; //@line 211 "../../src/imu/imu.c"
-  $357 = $356; //@line 211 "../../src/imu/imu.c"
-  $358 = $5; //@line 211 "../../src/imu/imu.c"
-  $359 = $6; //@line 211 "../../src/imu/imu.c"
-  $360 = HEAP32[$359>>2]|0; //@line 211 "../../src/imu/imu.c"
-  $361 = (($358) + (($360*144)|0)|0); //@line 211 "../../src/imu/imu.c"
-  $362 = ((($361)) + 16|0); //@line 211 "../../src/imu/imu.c"
-  $363 = $24; //@line 211 "../../src/imu/imu.c"
-  $364 = (($363) + 1)|0; //@line 211 "../../src/imu/imu.c"
-  $24 = $364; //@line 211 "../../src/imu/imu.c"
-  $365 = (($362) + ($363<<3)|0); //@line 211 "../../src/imu/imu.c"
-  HEAPF64[$365>>3] = $357; //@line 211 "../../src/imu/imu.c"
-  $366 = $4; //@line 212 "../../src/imu/imu.c"
-  $367 = ((($366)) + 1312|0); //@line 212 "../../src/imu/imu.c"
-  $368 = ((($367)) + 24|0); //@line 212 "../../src/imu/imu.c"
-  $369 = ((($368)) + 8|0); //@line 212 "../../src/imu/imu.c"
-  $370 = +HEAPF32[$369>>2]; //@line 212 "../../src/imu/imu.c"
-  $371 = $370; //@line 212 "../../src/imu/imu.c"
-  $372 = $5; //@line 212 "../../src/imu/imu.c"
-  $373 = $6; //@line 212 "../../src/imu/imu.c"
-  $374 = HEAP32[$373>>2]|0; //@line 212 "../../src/imu/imu.c"
-  $375 = (($372) + (($374*144)|0)|0); //@line 212 "../../src/imu/imu.c"
-  $376 = ((($375)) + 16|0); //@line 212 "../../src/imu/imu.c"
-  $377 = $24; //@line 212 "../../src/imu/imu.c"
-  $378 = (($377) + 1)|0; //@line 212 "../../src/imu/imu.c"
-  $24 = $378; //@line 212 "../../src/imu/imu.c"
-  $379 = (($376) + ($377<<3)|0); //@line 212 "../../src/imu/imu.c"
-  HEAPF64[$379>>3] = $371; //@line 212 "../../src/imu/imu.c"
-  $380 = $4; //@line 213 "../../src/imu/imu.c"
-  $381 = ((($380)) + 1312|0); //@line 213 "../../src/imu/imu.c"
-  $382 = ((($381)) + 24|0); //@line 213 "../../src/imu/imu.c"
-  $383 = ((($382)) + 12|0); //@line 213 "../../src/imu/imu.c"
-  $384 = +HEAPF32[$383>>2]; //@line 213 "../../src/imu/imu.c"
-  $385 = $384; //@line 213 "../../src/imu/imu.c"
-  $386 = $5; //@line 213 "../../src/imu/imu.c"
-  $387 = $6; //@line 213 "../../src/imu/imu.c"
-  $388 = HEAP32[$387>>2]|0; //@line 213 "../../src/imu/imu.c"
-  $389 = (($386) + (($388*144)|0)|0); //@line 213 "../../src/imu/imu.c"
-  $390 = ((($389)) + 16|0); //@line 213 "../../src/imu/imu.c"
-  $391 = $24; //@line 213 "../../src/imu/imu.c"
-  $392 = (($391) + 1)|0; //@line 213 "../../src/imu/imu.c"
-  $24 = $392; //@line 213 "../../src/imu/imu.c"
-  $393 = (($390) + ($391<<3)|0); //@line 213 "../../src/imu/imu.c"
-  HEAPF64[$393>>3] = $385; //@line 213 "../../src/imu/imu.c"
-  $394 = $24; //@line 214 "../../src/imu/imu.c"
-  $395 = $5; //@line 214 "../../src/imu/imu.c"
-  $396 = $6; //@line 214 "../../src/imu/imu.c"
-  $397 = HEAP32[$396>>2]|0; //@line 214 "../../src/imu/imu.c"
-  $398 = (($395) + (($397*144)|0)|0); //@line 214 "../../src/imu/imu.c"
-  $399 = ((($398)) + 12|0); //@line 214 "../../src/imu/imu.c"
-  HEAP32[$399>>2] = $394; //@line 214 "../../src/imu/imu.c"
-  $400 = $6; //@line 215 "../../src/imu/imu.c"
-  $401 = HEAP32[$400>>2]|0; //@line 215 "../../src/imu/imu.c"
-  $402 = (($401) + 1)|0; //@line 215 "../../src/imu/imu.c"
-  HEAP32[$400>>2] = $402; //@line 215 "../../src/imu/imu.c"
-  STACKTOP = sp;return; //@line 223 "../../src/imu/imu.c"
- } else {
-  $403 = $4; //@line 219 "../../src/imu/imu.c"
-  $404 = ((($403)) + 1312|0); //@line 219 "../../src/imu/imu.c"
-  $405 = ((($404)) + 24|0); //@line 219 "../../src/imu/imu.c"
-  $406 = ((($405)) + 4|0); //@line 219 "../../src/imu/imu.c"
-  $407 = +HEAPF32[$406>>2]; //@line 219 "../../src/imu/imu.c"
-  $408 = $407; //@line 219 "../../src/imu/imu.c"
-  $409 = $4; //@line 219 "../../src/imu/imu.c"
-  $410 = ((($409)) + 56|0); //@line 219 "../../src/imu/imu.c"
-  $411 = ((($410)) + 8|0); //@line 219 "../../src/imu/imu.c"
-  HEAPF64[$411>>3] = $408; //@line 219 "../../src/imu/imu.c"
-  $412 = $4; //@line 220 "../../src/imu/imu.c"
-  $413 = ((($412)) + 1312|0); //@line 220 "../../src/imu/imu.c"
-  $414 = ((($413)) + 24|0); //@line 220 "../../src/imu/imu.c"
-  $415 = ((($414)) + 8|0); //@line 220 "../../src/imu/imu.c"
-  $416 = +HEAPF32[$415>>2]; //@line 220 "../../src/imu/imu.c"
-  $417 = $416; //@line 220 "../../src/imu/imu.c"
-  $418 = $4; //@line 220 "../../src/imu/imu.c"
-  $419 = ((($418)) + 56|0); //@line 220 "../../src/imu/imu.c"
-  $420 = ((($419)) + 8|0); //@line 220 "../../src/imu/imu.c"
-  $421 = ((($420)) + 8|0); //@line 220 "../../src/imu/imu.c"
-  HEAPF64[$421>>3] = $417; //@line 220 "../../src/imu/imu.c"
-  $422 = $4; //@line 221 "../../src/imu/imu.c"
-  $423 = ((($422)) + 1312|0); //@line 221 "../../src/imu/imu.c"
-  $424 = ((($423)) + 24|0); //@line 221 "../../src/imu/imu.c"
-  $425 = ((($424)) + 12|0); //@line 221 "../../src/imu/imu.c"
-  $426 = +HEAPF32[$425>>2]; //@line 221 "../../src/imu/imu.c"
-  $427 = $426; //@line 221 "../../src/imu/imu.c"
-  $428 = $4; //@line 221 "../../src/imu/imu.c"
-  $429 = ((($428)) + 56|0); //@line 221 "../../src/imu/imu.c"
-  $430 = ((($429)) + 8|0); //@line 221 "../../src/imu/imu.c"
-  $431 = ((($430)) + 16|0); //@line 221 "../../src/imu/imu.c"
-  HEAPF64[$431>>3] = $427; //@line 221 "../../src/imu/imu.c"
-  STACKTOP = sp;return; //@line 223 "../../src/imu/imu.c"
- }
-}
-function _v3_cross_17($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0, $11 = 0.0, $12 = 0.0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $20 = 0, $21 = 0.0, $22 = 0.0, $23 = 0.0, $24 = 0, $25 = 0.0, $26 = 0, $27 = 0.0, $28 = 0.0, $29 = 0;
- var $3 = 0, $30 = 0.0, $31 = 0.0, $32 = 0.0, $33 = 0.0, $4 = 0.0, $5 = 0, $6 = 0.0, $7 = 0.0, $8 = 0, $9 = 0.0, label = 0, sp = 0;
- sp = STACKTOP;
- $3 = ((($1)) + 4|0); //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $4 = +HEAPF32[$3>>2]; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $5 = ((($2)) + 8|0); //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $6 = +HEAPF32[$5>>2]; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $7 = $4 * $6; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $8 = ((($1)) + 8|0); //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $9 = +HEAPF32[$8>>2]; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $10 = ((($2)) + 4|0); //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $11 = +HEAPF32[$10>>2]; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $12 = $9 * $11; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $13 = $7 - $12; //@line 220 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$0>>2] = $13; //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $14 = ((($0)) + 4|0); //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $15 = ((($1)) + 8|0); //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $16 = +HEAPF32[$15>>2]; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $17 = +HEAPF32[$2>>2]; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $18 = $16 * $17; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $19 = +HEAPF32[$1>>2]; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $20 = ((($2)) + 8|0); //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $21 = +HEAPF32[$20>>2]; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $22 = $19 * $21; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $23 = $18 - $22; //@line 221 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$14>>2] = $23; //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $24 = ((($0)) + 8|0); //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $25 = +HEAPF32[$1>>2]; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $26 = ((($2)) + 4|0); //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $27 = +HEAPF32[$26>>2]; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $28 = $25 * $27; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $29 = ((($1)) + 4|0); //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $30 = +HEAPF32[$29>>2]; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $31 = +HEAPF32[$2>>2]; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $32 = $30 * $31; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- $33 = $28 - $32; //@line 222 "../../src/imu/../quaternion/../math3d/math_3d.h"
- HEAPF32[$24>>2] = $33; //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
- return; //@line 219 "../../src/imu/../quaternion/../math3d/math_3d.h"
+ $4 = +HEAPF32[$1>>2]; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $5 = $3; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $6 = $4 * $5; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$0>>2] = $6; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $7 = ((($0)) + 4|0); //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $8 = ((($1)) + 4|0); //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $9 = +HEAPF32[$8>>2]; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $10 = $3; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $11 = $9 * $10; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$7>>2] = $11; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $12 = ((($0)) + 8|0); //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $13 = ((($1)) + 8|0); //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $14 = +HEAPF32[$13>>2]; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $15 = $3; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ $16 = $14 * $15; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ HEAPF32[$12>>2] = $16; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
+ STACKTOP = sp;return; //@line 107 "src/imu/../quaternion/../math3d/math_3d.h"
 }
 function _imu_update($0,$1,$2,$3) {
  $0 = $0|0;
@@ -6933,1683 +5250,1031 @@ function _imu_update($0,$1,$2,$3) {
  $4 = $0;
  $5 = $2;
  $6 = $3;
- $10 = $6; //@line 273 "../../src/imu/imu.c"
- $11 = HEAP32[$10>>2]|0; //@line 273 "../../src/imu/imu.c"
- $8 = $11; //@line 273 "../../src/imu/imu.c"
- $9 = -1; //@line 275 "../../src/imu/imu.c"
+ $10 = $6; //@line 86 "src/imu/imu.c"
+ $11 = HEAP32[$10>>2]|0; //@line 86 "src/imu/imu.c"
+ $8 = $11; //@line 86 "src/imu/imu.c"
+ $9 = -1; //@line 88 "src/imu/imu.c"
  while(1) {
-  $12 = $9; //@line 275 "../../src/imu/imu.c"
-  $13 = $8; //@line 275 "../../src/imu/imu.c"
-  $14 = ($12|0)<($13|0); //@line 275 "../../src/imu/imu.c"
+  $12 = $9; //@line 88 "src/imu/imu.c"
+  $13 = $8; //@line 88 "src/imu/imu.c"
+  $14 = ($12|0)<($13|0); //@line 88 "src/imu/imu.c"
   if (!($14)) {
    break;
   }
-  $15 = $9; //@line 277 "../../src/imu/imu.c"
-  $16 = ($15|0)==(-1); //@line 277 "../../src/imu/imu.c"
+  $15 = $9; //@line 90 "src/imu/imu.c"
+  $16 = ($15|0)==(-1); //@line 90 "src/imu/imu.c"
   if ($16) {
-   _memcpy(($7|0),($1|0),144)|0; //@line 279 "../../src/imu/imu.c"
+   _memcpy(($7|0),($1|0),144)|0; //@line 92 "src/imu/imu.c"
   } else {
-   $17 = $5; //@line 283 "../../src/imu/imu.c"
-   $18 = $9; //@line 283 "../../src/imu/imu.c"
-   $19 = (($17) + (($18*144)|0)|0); //@line 283 "../../src/imu/imu.c"
-   _memcpy(($7|0),($19|0),144)|0; //@line 283 "../../src/imu/imu.c"
+   $17 = $5; //@line 96 "src/imu/imu.c"
+   $18 = $9; //@line 96 "src/imu/imu.c"
+   $19 = (($17) + (($18*144)|0)|0); //@line 96 "src/imu/imu.c"
+   _memcpy(($7|0),($19|0),144)|0; //@line 96 "src/imu/imu.c"
   }
-  $20 = ((($7)) + 8|0); //@line 286 "../../src/imu/imu.c"
-  $21 = HEAP32[$20>>2]|0; //@line 286 "../../src/imu/imu.c"
+  $20 = ((($7)) + 8|0); //@line 99 "src/imu/imu.c"
+  $21 = HEAP32[$20>>2]|0; //@line 99 "src/imu/imu.c"
   switch ($21|0) {
   case 1:  {
-   $22 = $4; //@line 289 "../../src/imu/imu.c"
-   $23 = $5; //@line 289 "../../src/imu/imu.c"
-   $24 = $6; //@line 289 "../../src/imu/imu.c"
-   _memcpy(($$byval_copy|0),($7|0),144)|0; //@line 289 "../../src/imu/imu.c"
-   _imu_update_accelerometer($22,$$byval_copy,$23,$24); //@line 289 "../../src/imu/imu.c"
+   $22 = $4; //@line 102 "src/imu/imu.c"
+   $23 = $5; //@line 102 "src/imu/imu.c"
+   $24 = $6; //@line 102 "src/imu/imu.c"
+   _memcpy(($$byval_copy|0),($7|0),144)|0; //@line 102 "src/imu/imu.c"
+   _imu_update_accelerometer($22,$$byval_copy,$23,$24); //@line 102 "src/imu/imu.c"
    break;
   }
   case 2:  {
-   $25 = $4; //@line 292 "../../src/imu/imu.c"
-   $26 = $5; //@line 292 "../../src/imu/imu.c"
-   $27 = $6; //@line 292 "../../src/imu/imu.c"
-   _memcpy(($$byval_copy1|0),($7|0),144)|0; //@line 292 "../../src/imu/imu.c"
-   _imu_update_magnetic_field($25,$$byval_copy1,$26,$27); //@line 292 "../../src/imu/imu.c"
+   $25 = $4; //@line 105 "src/imu/imu.c"
+   $26 = $5; //@line 105 "src/imu/imu.c"
+   $27 = $6; //@line 105 "src/imu/imu.c"
+   _memcpy(($$byval_copy1|0),($7|0),144)|0; //@line 105 "src/imu/imu.c"
+   _imu_update_magnetic_field($25,$$byval_copy1,$26,$27); //@line 105 "src/imu/imu.c"
    break;
   }
   case 4:  {
-   $28 = $4; //@line 295 "../../src/imu/imu.c"
-   $29 = $5; //@line 295 "../../src/imu/imu.c"
-   $30 = $6; //@line 295 "../../src/imu/imu.c"
-   _memcpy(($$byval_copy2|0),($7|0),144)|0; //@line 295 "../../src/imu/imu.c"
-   _imu_update_gyro($28,$$byval_copy2,$29,$30); //@line 295 "../../src/imu/imu.c"
+   $28 = $4; //@line 108 "src/imu/imu.c"
+   $29 = $5; //@line 108 "src/imu/imu.c"
+   $30 = $6; //@line 108 "src/imu/imu.c"
+   _memcpy(($$byval_copy2|0),($7|0),144)|0; //@line 108 "src/imu/imu.c"
+   _imu_update_gyro($28,$$byval_copy2,$29,$30); //@line 108 "src/imu/imu.c"
    break;
   }
   default: {
   }
   }
-  $31 = $9; //@line 275 "../../src/imu/imu.c"
-  $32 = (($31) + 1)|0; //@line 275 "../../src/imu/imu.c"
-  $9 = $32; //@line 275 "../../src/imu/imu.c"
+  $31 = $9; //@line 88 "src/imu/imu.c"
+  $32 = (($31) + 1)|0; //@line 88 "src/imu/imu.c"
+  $9 = $32; //@line 88 "src/imu/imu.c"
  }
- STACKTOP = sp;return; //@line 299 "../../src/imu/imu.c"
+ STACKTOP = sp;return; //@line 112 "src/imu/imu.c"
 }
-function _imu_ekf_init($0,$1,$2) {
- $0 = $0|0;
+function _MadgwickAHRSupdate($0,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) {
+ $0 = +$0;
  $1 = +$1;
- $2 = $2|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0.0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0.0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0.0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0.0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0.0, $46 = 0, $47 = 0;
- var $48 = 0, $49 = 0, $5 = 0, $50 = 0.0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0, $56 = 0.0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $7 = 0.0, $8 = 0.0, $9 = 0, label = 0, sp = 0;
+ $2 = +$2;
+ $3 = +$3;
+ $4 = +$4;
+ $5 = +$5;
+ $6 = +$6;
+ $7 = +$7;
+ $8 = +$8;
+ $9 = +$9;
+ $10 = +$10;
+ $11 = +$11;
+ $12 = $12|0;
+ var $100 = 0.0, $101 = 0.0, $102 = 0.0, $103 = 0.0, $104 = 0.0, $105 = 0.0, $106 = 0.0, $107 = 0.0, $108 = 0.0, $109 = 0.0, $110 = 0.0, $111 = 0.0, $112 = 0.0, $113 = 0.0, $114 = 0.0, $115 = 0.0, $116 = 0.0, $117 = 0.0, $118 = 0.0, $119 = 0.0;
+ var $120 = 0.0, $121 = 0.0, $122 = 0.0, $123 = 0.0, $124 = 0.0, $125 = 0.0, $126 = 0.0, $127 = 0.0, $128 = 0.0, $129 = 0.0, $13 = 0.0, $130 = 0.0, $131 = 0.0, $132 = 0.0, $133 = 0.0, $134 = 0.0, $135 = 0.0, $136 = 0.0, $137 = 0.0, $138 = 0.0;
+ var $139 = 0.0, $14 = 0.0, $140 = 0.0, $141 = 0.0, $142 = 0.0, $143 = 0.0, $144 = 0.0, $145 = 0.0, $146 = 0.0, $147 = 0.0, $148 = 0.0, $149 = 0.0, $15 = 0.0, $150 = 0.0, $151 = 0.0, $152 = 0.0, $153 = 0.0, $154 = 0.0, $155 = 0.0, $156 = 0.0;
+ var $157 = 0.0, $158 = 0.0, $159 = 0.0, $16 = 0.0, $160 = 0.0, $161 = 0.0, $162 = 0.0, $163 = 0.0, $164 = 0.0, $165 = 0.0, $166 = 0.0, $167 = 0.0, $168 = 0.0, $169 = 0.0, $17 = 0.0, $170 = 0.0, $171 = 0.0, $172 = 0.0, $173 = 0.0, $174 = 0.0;
+ var $175 = 0.0, $176 = 0.0, $177 = 0.0, $178 = 0.0, $179 = 0.0, $18 = 0.0, $180 = 0.0, $181 = 0.0, $182 = 0.0, $183 = 0.0, $184 = 0.0, $185 = 0.0, $186 = 0.0, $187 = 0.0, $188 = 0.0, $189 = 0.0, $19 = 0.0, $190 = 0.0, $191 = 0.0, $192 = 0.0;
+ var $193 = 0.0, $194 = 0.0, $195 = 0.0, $196 = 0.0, $197 = 0.0, $198 = 0.0, $199 = 0.0, $20 = 0.0, $200 = 0.0, $201 = 0.0, $202 = 0.0, $203 = 0.0, $204 = 0.0, $205 = 0.0, $206 = 0.0, $207 = 0.0, $208 = 0.0, $209 = 0.0, $21 = 0.0, $210 = 0.0;
+ var $211 = 0.0, $212 = 0.0, $213 = 0.0, $214 = 0.0, $215 = 0.0, $216 = 0.0, $217 = 0.0, $218 = 0.0, $219 = 0.0, $22 = 0.0, $220 = 0.0, $221 = 0.0, $222 = 0.0, $223 = 0.0, $224 = 0.0, $225 = 0.0, $226 = 0.0, $227 = 0.0, $228 = 0.0, $229 = 0.0;
+ var $23 = 0.0, $230 = 0.0, $231 = 0.0, $232 = 0.0, $233 = 0.0, $234 = 0.0, $235 = 0.0, $236 = 0.0, $237 = 0.0, $238 = 0.0, $239 = 0.0, $24 = 0.0, $240 = 0.0, $241 = 0.0, $242 = 0.0, $243 = 0.0, $244 = 0.0, $245 = 0.0, $246 = 0.0, $247 = 0.0;
+ var $248 = 0.0, $249 = 0.0, $25 = 0, $250 = 0.0, $251 = 0.0, $252 = 0.0, $253 = 0.0, $254 = 0.0, $255 = 0.0, $256 = 0.0, $257 = 0.0, $258 = 0.0, $259 = 0.0, $26 = 0.0, $260 = 0.0, $261 = 0.0, $262 = 0.0, $263 = 0.0, $264 = 0.0, $265 = 0.0;
+ var $266 = 0.0, $267 = 0.0, $268 = 0.0, $269 = 0.0, $27 = 0.0, $270 = 0.0, $271 = 0.0, $272 = 0.0, $273 = 0.0, $274 = 0.0, $275 = 0.0, $276 = 0.0, $277 = 0.0, $278 = 0.0, $279 = 0.0, $28 = 0.0, $280 = 0.0, $281 = 0.0, $282 = 0.0, $283 = 0.0;
+ var $284 = 0.0, $285 = 0.0, $286 = 0.0, $287 = 0.0, $288 = 0.0, $289 = 0.0, $29 = 0.0, $290 = 0.0, $291 = 0.0, $292 = 0.0, $293 = 0.0, $294 = 0.0, $295 = 0.0, $296 = 0.0, $297 = 0.0, $298 = 0.0, $299 = 0.0, $30 = 0.0, $300 = 0.0, $301 = 0.0;
+ var $302 = 0.0, $303 = 0.0, $304 = 0.0, $305 = 0.0, $306 = 0.0, $307 = 0.0, $308 = 0.0, $309 = 0.0, $31 = 0.0, $310 = 0.0, $311 = 0.0, $312 = 0.0, $313 = 0.0, $314 = 0.0, $315 = 0.0, $316 = 0.0, $317 = 0.0, $318 = 0.0, $319 = 0.0, $32 = 0.0;
+ var $320 = 0.0, $321 = 0.0, $322 = 0.0, $323 = 0.0, $324 = 0.0, $325 = 0.0, $326 = 0.0, $327 = 0.0, $328 = 0.0, $329 = 0.0, $33 = 0.0, $330 = 0.0, $331 = 0.0, $332 = 0.0, $333 = 0.0, $334 = 0.0, $335 = 0.0, $336 = 0.0, $337 = 0.0, $338 = 0.0;
+ var $339 = 0.0, $34 = 0.0, $340 = 0.0, $341 = 0.0, $342 = 0.0, $343 = 0.0, $344 = 0.0, $345 = 0.0, $346 = 0.0, $347 = 0.0, $348 = 0.0, $349 = 0.0, $35 = 0.0, $350 = 0.0, $351 = 0.0, $352 = 0.0, $353 = 0.0, $354 = 0.0, $355 = 0.0, $356 = 0.0;
+ var $357 = 0.0, $358 = 0.0, $359 = 0.0, $36 = 0.0, $360 = 0.0, $361 = 0.0, $362 = 0.0, $363 = 0.0, $364 = 0.0, $365 = 0.0, $366 = 0.0, $367 = 0.0, $368 = 0.0, $369 = 0.0, $37 = 0.0, $370 = 0.0, $371 = 0.0, $372 = 0.0, $373 = 0.0, $374 = 0.0;
+ var $375 = 0.0, $376 = 0.0, $377 = 0.0, $378 = 0.0, $379 = 0.0, $38 = 0.0, $380 = 0.0, $381 = 0.0, $382 = 0.0, $383 = 0.0, $384 = 0.0, $385 = 0.0, $386 = 0.0, $387 = 0.0, $388 = 0.0, $389 = 0.0, $39 = 0.0, $390 = 0.0, $391 = 0.0, $392 = 0.0;
+ var $393 = 0.0, $394 = 0.0, $395 = 0.0, $396 = 0.0, $397 = 0.0, $398 = 0.0, $399 = 0.0, $40 = 0.0, $400 = 0.0, $401 = 0.0, $402 = 0.0, $403 = 0.0, $404 = 0.0, $405 = 0.0, $406 = 0.0, $407 = 0.0, $408 = 0.0, $409 = 0.0, $41 = 0.0, $410 = 0.0;
+ var $411 = 0.0, $412 = 0.0, $413 = 0.0, $414 = 0.0, $415 = 0.0, $416 = 0.0, $417 = 0.0, $418 = 0.0, $419 = 0.0, $42 = 0.0, $420 = 0.0, $421 = 0.0, $422 = 0.0, $423 = 0.0, $424 = 0.0, $425 = 0.0, $426 = 0.0, $427 = 0.0, $428 = 0.0, $429 = 0.0;
+ var $43 = 0.0, $430 = 0.0, $431 = 0.0, $432 = 0.0, $433 = 0.0, $434 = 0.0, $435 = 0.0, $436 = 0.0, $437 = 0.0, $438 = 0.0, $439 = 0.0, $44 = 0.0, $440 = 0.0, $441 = 0.0, $442 = 0.0, $443 = 0.0, $444 = 0.0, $445 = 0.0, $446 = 0.0, $447 = 0.0;
+ var $448 = 0.0, $449 = 0.0, $45 = 0.0, $450 = 0.0, $451 = 0.0, $452 = 0.0, $453 = 0.0, $454 = 0.0, $455 = 0.0, $456 = 0.0, $457 = 0.0, $458 = 0.0, $459 = 0.0, $46 = 0.0, $460 = 0.0, $461 = 0.0, $462 = 0.0, $463 = 0.0, $464 = 0.0, $465 = 0.0;
+ var $466 = 0.0, $467 = 0.0, $468 = 0.0, $469 = 0.0, $47 = 0.0, $470 = 0.0, $471 = 0.0, $472 = 0.0, $473 = 0.0, $474 = 0.0, $475 = 0.0, $476 = 0.0, $477 = 0.0, $478 = 0.0, $479 = 0.0, $48 = 0.0, $480 = 0.0, $481 = 0.0, $482 = 0.0, $483 = 0.0;
+ var $484 = 0.0, $485 = 0.0, $486 = 0.0, $487 = 0.0, $488 = 0.0, $489 = 0.0, $49 = 0.0, $490 = 0.0, $491 = 0.0, $492 = 0.0, $493 = 0.0, $494 = 0.0, $495 = 0.0, $496 = 0.0, $497 = 0.0, $498 = 0.0, $499 = 0.0, $50 = 0.0, $500 = 0.0, $501 = 0.0;
+ var $502 = 0.0, $503 = 0.0, $504 = 0.0, $505 = 0.0, $506 = 0.0, $507 = 0.0, $508 = 0.0, $509 = 0.0, $51 = 0.0, $510 = 0.0, $511 = 0.0, $512 = 0.0, $513 = 0.0, $514 = 0.0, $515 = 0.0, $516 = 0.0, $517 = 0.0, $518 = 0.0, $519 = 0.0, $52 = 0.0;
+ var $520 = 0.0, $521 = 0.0, $522 = 0.0, $523 = 0.0, $524 = 0.0, $525 = 0.0, $526 = 0.0, $527 = 0.0, $528 = 0.0, $529 = 0.0, $53 = 0.0, $530 = 0.0, $531 = 0.0, $532 = 0.0, $533 = 0.0, $534 = 0.0, $535 = 0.0, $536 = 0.0, $537 = 0.0, $538 = 0.0;
+ var $539 = 0.0, $54 = 0.0, $540 = 0.0, $541 = 0.0, $542 = 0.0, $543 = 0.0, $544 = 0.0, $545 = 0.0, $546 = 0.0, $547 = 0.0, $548 = 0.0, $549 = 0.0, $55 = 0.0, $550 = 0.0, $551 = 0.0, $552 = 0.0, $553 = 0.0, $554 = 0.0, $555 = 0.0, $556 = 0.0;
+ var $557 = 0.0, $558 = 0.0, $559 = 0.0, $56 = 0.0, $560 = 0.0, $561 = 0.0, $562 = 0.0, $563 = 0.0, $564 = 0.0, $565 = 0.0, $566 = 0.0, $567 = 0.0, $568 = 0.0, $569 = 0.0, $57 = 0.0, $570 = 0.0, $571 = 0.0, $572 = 0.0, $573 = 0.0, $574 = 0.0;
+ var $575 = 0.0, $576 = 0.0, $577 = 0.0, $578 = 0.0, $579 = 0.0, $58 = 0.0, $580 = 0.0, $581 = 0.0, $582 = 0.0, $583 = 0.0, $584 = 0.0, $585 = 0.0, $586 = 0.0, $587 = 0.0, $588 = 0.0, $589 = 0.0, $59 = 0.0, $590 = 0.0, $591 = 0.0, $592 = 0.0;
+ var $593 = 0.0, $594 = 0.0, $595 = 0.0, $596 = 0.0, $597 = 0.0, $598 = 0.0, $599 = 0.0, $60 = 0.0, $600 = 0.0, $601 = 0.0, $602 = 0.0, $603 = 0.0, $604 = 0.0, $605 = 0.0, $606 = 0.0, $607 = 0.0, $608 = 0.0, $609 = 0.0, $61 = 0.0, $610 = 0.0;
+ var $611 = 0.0, $612 = 0.0, $613 = 0.0, $614 = 0.0, $615 = 0.0, $616 = 0.0, $617 = 0.0, $618 = 0.0, $619 = 0.0, $62 = 0.0, $620 = 0.0, $621 = 0.0, $622 = 0.0, $623 = 0.0, $624 = 0.0, $625 = 0.0, $626 = 0.0, $627 = 0.0, $628 = 0.0, $629 = 0.0;
+ var $63 = 0.0, $630 = 0.0, $631 = 0.0, $632 = 0.0, $633 = 0.0, $634 = 0.0, $635 = 0.0, $636 = 0.0, $637 = 0.0, $638 = 0.0, $639 = 0.0, $64 = 0.0, $640 = 0.0, $641 = 0.0, $642 = 0.0, $643 = 0.0, $644 = 0.0, $645 = 0.0, $646 = 0.0, $647 = 0.0;
+ var $648 = 0.0, $649 = 0.0, $65 = 0.0, $650 = 0.0, $651 = 0.0, $652 = 0.0, $653 = 0.0, $654 = 0.0, $655 = 0.0, $656 = 0.0, $657 = 0.0, $658 = 0.0, $659 = 0.0, $66 = 0.0, $660 = 0.0, $661 = 0.0, $662 = 0.0, $663 = 0.0, $664 = 0.0, $665 = 0.0;
+ var $666 = 0.0, $667 = 0.0, $668 = 0.0, $669 = 0.0, $67 = 0.0, $670 = 0.0, $671 = 0.0, $672 = 0.0, $673 = 0.0, $674 = 0.0, $675 = 0.0, $676 = 0.0, $677 = 0.0, $678 = 0.0, $679 = 0.0, $68 = 0.0, $680 = 0.0, $681 = 0.0, $682 = 0.0, $683 = 0.0;
+ var $684 = 0.0, $685 = 0.0, $686 = 0.0, $687 = 0.0, $688 = 0.0, $689 = 0.0, $69 = 0.0, $690 = 0.0, $691 = 0.0, $692 = 0.0, $693 = 0.0, $694 = 0.0, $695 = 0.0, $696 = 0.0, $697 = 0.0, $698 = 0.0, $699 = 0.0, $70 = 0.0, $700 = 0.0, $701 = 0.0;
+ var $702 = 0.0, $703 = 0.0, $704 = 0.0, $705 = 0.0, $706 = 0.0, $707 = 0.0, $708 = 0.0, $709 = 0.0, $71 = 0.0, $710 = 0.0, $711 = 0.0, $712 = 0.0, $713 = 0.0, $714 = 0.0, $715 = 0.0, $716 = 0.0, $717 = 0.0, $718 = 0.0, $719 = 0.0, $72 = 0.0;
+ var $720 = 0.0, $721 = 0.0, $722 = 0.0, $723 = 0.0, $724 = 0.0, $725 = 0.0, $726 = 0.0, $727 = 0.0, $728 = 0.0, $729 = 0.0, $73 = 0.0, $730 = 0.0, $731 = 0.0, $732 = 0.0, $733 = 0.0, $734 = 0.0, $735 = 0.0, $736 = 0.0, $737 = 0.0, $738 = 0.0;
+ var $739 = 0.0, $74 = 0.0, $740 = 0.0, $741 = 0.0, $742 = 0.0, $743 = 0.0, $744 = 0.0, $745 = 0.0, $746 = 0.0, $747 = 0.0, $748 = 0.0, $749 = 0.0, $75 = 0.0, $750 = 0.0, $751 = 0.0, $752 = 0.0, $753 = 0.0, $754 = 0.0, $755 = 0.0, $756 = 0.0;
+ var $757 = 0.0, $758 = 0.0, $759 = 0.0, $76 = 0.0, $760 = 0.0, $761 = 0.0, $762 = 0.0, $763 = 0.0, $764 = 0.0, $765 = 0.0, $766 = 0.0, $767 = 0.0, $768 = 0.0, $769 = 0.0, $77 = 0.0, $770 = 0.0, $771 = 0.0, $772 = 0.0, $773 = 0.0, $774 = 0.0;
+ var $775 = 0.0, $776 = 0.0, $777 = 0.0, $778 = 0.0, $779 = 0.0, $78 = 0, $780 = 0.0, $781 = 0.0, $782 = 0.0, $783 = 0.0, $784 = 0.0, $785 = 0.0, $786 = 0.0, $787 = 0.0, $788 = 0.0, $789 = 0.0, $79 = 0.0, $790 = 0.0, $791 = 0.0, $792 = 0.0;
+ var $793 = 0.0, $794 = 0.0, $795 = 0.0, $796 = 0.0, $797 = 0.0, $798 = 0.0, $799 = 0.0, $80 = 0, $800 = 0.0, $801 = 0.0, $802 = 0.0, $803 = 0.0, $804 = 0.0, $805 = 0.0, $806 = 0.0, $807 = 0.0, $808 = 0.0, $809 = 0.0, $81 = 0, $810 = 0.0;
+ var $811 = 0.0, $812 = 0.0, $813 = 0.0, $814 = 0.0, $815 = 0.0, $816 = 0.0, $817 = 0.0, $818 = 0.0, $819 = 0.0, $82 = 0.0, $820 = 0.0, $821 = 0.0, $822 = 0.0, $823 = 0.0, $824 = 0.0, $825 = 0.0, $826 = 0.0, $827 = 0.0, $828 = 0.0, $829 = 0.0;
+ var $83 = 0, $830 = 0.0, $831 = 0.0, $832 = 0.0, $833 = 0.0, $834 = 0.0, $835 = 0.0, $836 = 0.0, $837 = 0, $838 = 0.0, $839 = 0, $84 = 0, $840 = 0, $841 = 0.0, $842 = 0, $843 = 0, $844 = 0.0, $845 = 0, $846 = 0, $85 = 0.0;
+ var $86 = 0, $87 = 0, $88 = 0.0, $89 = 0.0, $90 = 0.0, $91 = 0.0, $92 = 0.0, $93 = 0.0, $94 = 0.0, $95 = 0.0, $96 = 0.0, $97 = 0.0, $98 = 0.0, $99 = 0.0, label = 0, sp = 0;
  sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $3 = $0;
- $4 = $1;
- $5 = $2;
- $10 = $3; //@line 6 "../../src/imu/imu_ekf.c"
- _ekf_init($10,3,3); //@line 6 "../../src/imu/imu_ekf.c"
- $6 = 0; //@line 8 "../../src/imu/imu_ekf.c"
- while(1) {
-  $11 = $6; //@line 8 "../../src/imu/imu_ekf.c"
-  $12 = ($11|0)<(3); //@line 8 "../../src/imu/imu_ekf.c"
-  if (!($12)) {
-   break;
-  }
-  $13 = $4; //@line 10 "../../src/imu/imu_ekf.c"
-  $14 = $3; //@line 10 "../../src/imu/imu_ekf.c"
-  $15 = ((($14)) + 104|0); //@line 10 "../../src/imu/imu_ekf.c"
-  $16 = $6; //@line 10 "../../src/imu/imu_ekf.c"
-  $17 = (($15) + (($16*24)|0)|0); //@line 10 "../../src/imu/imu_ekf.c"
-  $18 = $6; //@line 10 "../../src/imu/imu_ekf.c"
-  $19 = (($17) + ($18<<3)|0); //@line 10 "../../src/imu/imu_ekf.c"
-  HEAPF64[$19>>3] = $13; //@line 10 "../../src/imu/imu_ekf.c"
-  $20 = $6; //@line 8 "../../src/imu/imu_ekf.c"
-  $21 = (($20) + 1)|0; //@line 8 "../../src/imu/imu_ekf.c"
-  $6 = $21; //@line 8 "../../src/imu/imu_ekf.c"
- }
- $7 = 0.5; //@line 13 "../../src/imu/imu_ekf.c"
- $8 = 0.5; //@line 14 "../../src/imu/imu_ekf.c"
- $9 = 0; //@line 18 "../../src/imu/imu_ekf.c"
- while(1) {
-  $22 = $9; //@line 18 "../../src/imu/imu_ekf.c"
-  $23 = ($22|0)<(3); //@line 18 "../../src/imu/imu_ekf.c"
-  if (!($23)) {
-   break;
-  }
-  $24 = $7; //@line 19 "../../src/imu/imu_ekf.c"
-  $25 = $3; //@line 19 "../../src/imu/imu_ekf.c"
-  $26 = ((($25)) + 32|0); //@line 19 "../../src/imu/imu_ekf.c"
-  $27 = $9; //@line 19 "../../src/imu/imu_ekf.c"
-  $28 = (($26) + (($27*24)|0)|0); //@line 19 "../../src/imu/imu_ekf.c"
-  $29 = $9; //@line 19 "../../src/imu/imu_ekf.c"
-  $30 = (($28) + ($29<<3)|0); //@line 19 "../../src/imu/imu_ekf.c"
-  HEAPF64[$30>>3] = $24; //@line 19 "../../src/imu/imu_ekf.c"
-  $31 = $9; //@line 18 "../../src/imu/imu_ekf.c"
-  $32 = (($31) + 1)|0; //@line 18 "../../src/imu/imu_ekf.c"
-  $9 = $32; //@line 18 "../../src/imu/imu_ekf.c"
- }
- $9 = 0; //@line 21 "../../src/imu/imu_ekf.c"
- while(1) {
-  $33 = $9; //@line 21 "../../src/imu/imu_ekf.c"
-  $34 = ($33|0)<(3); //@line 21 "../../src/imu/imu_ekf.c"
-  if (!($34)) {
-   break;
-  }
-  $35 = $8; //@line 22 "../../src/imu/imu_ekf.c"
-  $36 = $3; //@line 22 "../../src/imu/imu_ekf.c"
-  $37 = ((($36)) + 176|0); //@line 22 "../../src/imu/imu_ekf.c"
-  $38 = $9; //@line 22 "../../src/imu/imu_ekf.c"
-  $39 = (($37) + (($38*24)|0)|0); //@line 22 "../../src/imu/imu_ekf.c"
-  $40 = $9; //@line 22 "../../src/imu/imu_ekf.c"
-  $41 = (($39) + ($40<<3)|0); //@line 22 "../../src/imu/imu_ekf.c"
-  HEAPF64[$41>>3] = $35; //@line 22 "../../src/imu/imu_ekf.c"
-  $42 = $9; //@line 21 "../../src/imu/imu_ekf.c"
-  $43 = (($42) + 1)|0; //@line 21 "../../src/imu/imu_ekf.c"
-  $9 = $43; //@line 21 "../../src/imu/imu_ekf.c"
- }
- $44 = $5; //@line 25 "../../src/imu/imu_ekf.c"
- $45 = +HEAPF64[$44>>3]; //@line 25 "../../src/imu/imu_ekf.c"
- $46 = $3; //@line 25 "../../src/imu/imu_ekf.c"
- $47 = ((($46)) + 8|0); //@line 25 "../../src/imu/imu_ekf.c"
- HEAPF64[$47>>3] = $45; //@line 25 "../../src/imu/imu_ekf.c"
- $48 = $5; //@line 26 "../../src/imu/imu_ekf.c"
- $49 = ((($48)) + 8|0); //@line 26 "../../src/imu/imu_ekf.c"
- $50 = +HEAPF64[$49>>3]; //@line 26 "../../src/imu/imu_ekf.c"
- $51 = $3; //@line 26 "../../src/imu/imu_ekf.c"
- $52 = ((($51)) + 8|0); //@line 26 "../../src/imu/imu_ekf.c"
- $53 = ((($52)) + 8|0); //@line 26 "../../src/imu/imu_ekf.c"
- HEAPF64[$53>>3] = $50; //@line 26 "../../src/imu/imu_ekf.c"
- $54 = $5; //@line 27 "../../src/imu/imu_ekf.c"
- $55 = ((($54)) + 16|0); //@line 27 "../../src/imu/imu_ekf.c"
- $56 = +HEAPF64[$55>>3]; //@line 27 "../../src/imu/imu_ekf.c"
- $57 = $3; //@line 27 "../../src/imu/imu_ekf.c"
- $58 = ((($57)) + 8|0); //@line 27 "../../src/imu/imu_ekf.c"
- $59 = ((($58)) + 16|0); //@line 27 "../../src/imu/imu_ekf.c"
- HEAPF64[$59>>3] = $56; //@line 27 "../../src/imu/imu_ekf.c"
- STACKTOP = sp;return; //@line 28 "../../src/imu/imu_ekf.c"
+ STACKTOP = STACKTOP + 256|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(256|0);
+ $13 = $0;
+ $14 = $1;
+ $15 = $2;
+ $16 = $3;
+ $17 = $4;
+ $18 = $5;
+ $19 = $6;
+ $20 = $7;
+ $21 = $8;
+ $22 = $9;
+ $23 = $10;
+ $24 = $11;
+ $25 = $12;
+ $76 = $23; //@line 43 "src/imu/MadgwickAHRS.c"
+ $74 = $76; //@line 43 "src/imu/MadgwickAHRS.c"
+ $77 = $24; //@line 44 "src/imu/MadgwickAHRS.c"
+ $75 = $77; //@line 44 "src/imu/MadgwickAHRS.c"
+ $78 = $25; //@line 46 "src/imu/MadgwickAHRS.c"
+ $79 = +HEAPF32[$78>>2]; //@line 46 "src/imu/MadgwickAHRS.c"
+ $70 = $79; //@line 46 "src/imu/MadgwickAHRS.c"
+ $80 = $25; //@line 47 "src/imu/MadgwickAHRS.c"
+ $81 = ((($80)) + 4|0); //@line 47 "src/imu/MadgwickAHRS.c"
+ $82 = +HEAPF32[$81>>2]; //@line 47 "src/imu/MadgwickAHRS.c"
+ $71 = $82; //@line 47 "src/imu/MadgwickAHRS.c"
+ $83 = $25; //@line 48 "src/imu/MadgwickAHRS.c"
+ $84 = ((($83)) + 8|0); //@line 48 "src/imu/MadgwickAHRS.c"
+ $85 = +HEAPF32[$84>>2]; //@line 48 "src/imu/MadgwickAHRS.c"
+ $72 = $85; //@line 48 "src/imu/MadgwickAHRS.c"
+ $86 = $25; //@line 49 "src/imu/MadgwickAHRS.c"
+ $87 = ((($86)) + 12|0); //@line 49 "src/imu/MadgwickAHRS.c"
+ $88 = +HEAPF32[$87>>2]; //@line 49 "src/imu/MadgwickAHRS.c"
+ $73 = $88; //@line 49 "src/imu/MadgwickAHRS.c"
+ $89 = $71; //@line 52 "src/imu/MadgwickAHRS.c"
+ $90 = - $89; //@line 52 "src/imu/MadgwickAHRS.c"
+ $91 = $13; //@line 52 "src/imu/MadgwickAHRS.c"
+ $92 = $90 * $91; //@line 52 "src/imu/MadgwickAHRS.c"
+ $93 = $72; //@line 52 "src/imu/MadgwickAHRS.c"
+ $94 = $14; //@line 52 "src/imu/MadgwickAHRS.c"
+ $95 = $93 * $94; //@line 52 "src/imu/MadgwickAHRS.c"
+ $96 = $92 - $95; //@line 52 "src/imu/MadgwickAHRS.c"
+ $97 = $73; //@line 52 "src/imu/MadgwickAHRS.c"
+ $98 = $15; //@line 52 "src/imu/MadgwickAHRS.c"
+ $99 = $97 * $98; //@line 52 "src/imu/MadgwickAHRS.c"
+ $100 = $96 - $99; //@line 52 "src/imu/MadgwickAHRS.c"
+ $101 = 0.5 * $100; //@line 52 "src/imu/MadgwickAHRS.c"
+ $35 = $101; //@line 52 "src/imu/MadgwickAHRS.c"
+ $102 = $70; //@line 53 "src/imu/MadgwickAHRS.c"
+ $103 = $13; //@line 53 "src/imu/MadgwickAHRS.c"
+ $104 = $102 * $103; //@line 53 "src/imu/MadgwickAHRS.c"
+ $105 = $72; //@line 53 "src/imu/MadgwickAHRS.c"
+ $106 = $15; //@line 53 "src/imu/MadgwickAHRS.c"
+ $107 = $105 * $106; //@line 53 "src/imu/MadgwickAHRS.c"
+ $108 = $104 + $107; //@line 53 "src/imu/MadgwickAHRS.c"
+ $109 = $73; //@line 53 "src/imu/MadgwickAHRS.c"
+ $110 = $14; //@line 53 "src/imu/MadgwickAHRS.c"
+ $111 = $109 * $110; //@line 53 "src/imu/MadgwickAHRS.c"
+ $112 = $108 - $111; //@line 53 "src/imu/MadgwickAHRS.c"
+ $113 = 0.5 * $112; //@line 53 "src/imu/MadgwickAHRS.c"
+ $36 = $113; //@line 53 "src/imu/MadgwickAHRS.c"
+ $114 = $70; //@line 54 "src/imu/MadgwickAHRS.c"
+ $115 = $14; //@line 54 "src/imu/MadgwickAHRS.c"
+ $116 = $114 * $115; //@line 54 "src/imu/MadgwickAHRS.c"
+ $117 = $71; //@line 54 "src/imu/MadgwickAHRS.c"
+ $118 = $15; //@line 54 "src/imu/MadgwickAHRS.c"
+ $119 = $117 * $118; //@line 54 "src/imu/MadgwickAHRS.c"
+ $120 = $116 - $119; //@line 54 "src/imu/MadgwickAHRS.c"
+ $121 = $73; //@line 54 "src/imu/MadgwickAHRS.c"
+ $122 = $13; //@line 54 "src/imu/MadgwickAHRS.c"
+ $123 = $121 * $122; //@line 54 "src/imu/MadgwickAHRS.c"
+ $124 = $120 + $123; //@line 54 "src/imu/MadgwickAHRS.c"
+ $125 = 0.5 * $124; //@line 54 "src/imu/MadgwickAHRS.c"
+ $37 = $125; //@line 54 "src/imu/MadgwickAHRS.c"
+ $126 = $70; //@line 55 "src/imu/MadgwickAHRS.c"
+ $127 = $15; //@line 55 "src/imu/MadgwickAHRS.c"
+ $128 = $126 * $127; //@line 55 "src/imu/MadgwickAHRS.c"
+ $129 = $71; //@line 55 "src/imu/MadgwickAHRS.c"
+ $130 = $14; //@line 55 "src/imu/MadgwickAHRS.c"
+ $131 = $129 * $130; //@line 55 "src/imu/MadgwickAHRS.c"
+ $132 = $128 + $131; //@line 55 "src/imu/MadgwickAHRS.c"
+ $133 = $72; //@line 55 "src/imu/MadgwickAHRS.c"
+ $134 = $13; //@line 55 "src/imu/MadgwickAHRS.c"
+ $135 = $133 * $134; //@line 55 "src/imu/MadgwickAHRS.c"
+ $136 = $132 - $135; //@line 55 "src/imu/MadgwickAHRS.c"
+ $137 = 0.5 * $136; //@line 55 "src/imu/MadgwickAHRS.c"
+ $38 = $137; //@line 55 "src/imu/MadgwickAHRS.c"
+ $138 = $19; //@line 58 "src/imu/MadgwickAHRS.c"
+ $139 = $19; //@line 58 "src/imu/MadgwickAHRS.c"
+ $140 = $138 * $139; //@line 58 "src/imu/MadgwickAHRS.c"
+ $141 = $20; //@line 58 "src/imu/MadgwickAHRS.c"
+ $142 = $20; //@line 58 "src/imu/MadgwickAHRS.c"
+ $143 = $141 * $142; //@line 58 "src/imu/MadgwickAHRS.c"
+ $144 = $140 + $143; //@line 58 "src/imu/MadgwickAHRS.c"
+ $145 = $21; //@line 58 "src/imu/MadgwickAHRS.c"
+ $146 = $21; //@line 58 "src/imu/MadgwickAHRS.c"
+ $147 = $145 * $146; //@line 58 "src/imu/MadgwickAHRS.c"
+ $148 = $144 + $147; //@line 58 "src/imu/MadgwickAHRS.c"
+ $149 = (+_invSqrt($148)); //@line 58 "src/imu/MadgwickAHRS.c"
+ $26 = $149; //@line 58 "src/imu/MadgwickAHRS.c"
+ $150 = $26; //@line 59 "src/imu/MadgwickAHRS.c"
+ $151 = $19; //@line 59 "src/imu/MadgwickAHRS.c"
+ $152 = $151 * $150; //@line 59 "src/imu/MadgwickAHRS.c"
+ $19 = $152; //@line 59 "src/imu/MadgwickAHRS.c"
+ $153 = $26; //@line 60 "src/imu/MadgwickAHRS.c"
+ $154 = $20; //@line 60 "src/imu/MadgwickAHRS.c"
+ $155 = $154 * $153; //@line 60 "src/imu/MadgwickAHRS.c"
+ $20 = $155; //@line 60 "src/imu/MadgwickAHRS.c"
+ $156 = $26; //@line 61 "src/imu/MadgwickAHRS.c"
+ $157 = $21; //@line 61 "src/imu/MadgwickAHRS.c"
+ $158 = $157 * $156; //@line 61 "src/imu/MadgwickAHRS.c"
+ $21 = $158; //@line 61 "src/imu/MadgwickAHRS.c"
+ $159 = $70; //@line 64 "src/imu/MadgwickAHRS.c"
+ $160 = 2.0 * $159; //@line 64 "src/imu/MadgwickAHRS.c"
+ $161 = $19; //@line 64 "src/imu/MadgwickAHRS.c"
+ $162 = $160 * $161; //@line 64 "src/imu/MadgwickAHRS.c"
+ $41 = $162; //@line 64 "src/imu/MadgwickAHRS.c"
+ $163 = $70; //@line 65 "src/imu/MadgwickAHRS.c"
+ $164 = 2.0 * $163; //@line 65 "src/imu/MadgwickAHRS.c"
+ $165 = $20; //@line 65 "src/imu/MadgwickAHRS.c"
+ $166 = $164 * $165; //@line 65 "src/imu/MadgwickAHRS.c"
+ $42 = $166; //@line 65 "src/imu/MadgwickAHRS.c"
+ $167 = $70; //@line 66 "src/imu/MadgwickAHRS.c"
+ $168 = 2.0 * $167; //@line 66 "src/imu/MadgwickAHRS.c"
+ $169 = $21; //@line 66 "src/imu/MadgwickAHRS.c"
+ $170 = $168 * $169; //@line 66 "src/imu/MadgwickAHRS.c"
+ $43 = $170; //@line 66 "src/imu/MadgwickAHRS.c"
+ $171 = $71; //@line 67 "src/imu/MadgwickAHRS.c"
+ $172 = 2.0 * $171; //@line 67 "src/imu/MadgwickAHRS.c"
+ $173 = $19; //@line 67 "src/imu/MadgwickAHRS.c"
+ $174 = $172 * $173; //@line 67 "src/imu/MadgwickAHRS.c"
+ $44 = $174; //@line 67 "src/imu/MadgwickAHRS.c"
+ $175 = $70; //@line 68 "src/imu/MadgwickAHRS.c"
+ $176 = 2.0 * $175; //@line 68 "src/imu/MadgwickAHRS.c"
+ $49 = $176; //@line 68 "src/imu/MadgwickAHRS.c"
+ $177 = $71; //@line 69 "src/imu/MadgwickAHRS.c"
+ $178 = 2.0 * $177; //@line 69 "src/imu/MadgwickAHRS.c"
+ $50 = $178; //@line 69 "src/imu/MadgwickAHRS.c"
+ $179 = $72; //@line 70 "src/imu/MadgwickAHRS.c"
+ $180 = 2.0 * $179; //@line 70 "src/imu/MadgwickAHRS.c"
+ $51 = $180; //@line 70 "src/imu/MadgwickAHRS.c"
+ $181 = $73; //@line 71 "src/imu/MadgwickAHRS.c"
+ $182 = 2.0 * $181; //@line 71 "src/imu/MadgwickAHRS.c"
+ $52 = $182; //@line 71 "src/imu/MadgwickAHRS.c"
+ $183 = $70; //@line 72 "src/imu/MadgwickAHRS.c"
+ $184 = 2.0 * $183; //@line 72 "src/imu/MadgwickAHRS.c"
+ $185 = $72; //@line 72 "src/imu/MadgwickAHRS.c"
+ $186 = $184 * $185; //@line 72 "src/imu/MadgwickAHRS.c"
+ $53 = $186; //@line 72 "src/imu/MadgwickAHRS.c"
+ $187 = $72; //@line 73 "src/imu/MadgwickAHRS.c"
+ $188 = 2.0 * $187; //@line 73 "src/imu/MadgwickAHRS.c"
+ $189 = $73; //@line 73 "src/imu/MadgwickAHRS.c"
+ $190 = $188 * $189; //@line 73 "src/imu/MadgwickAHRS.c"
+ $54 = $190; //@line 73 "src/imu/MadgwickAHRS.c"
+ $191 = $70; //@line 74 "src/imu/MadgwickAHRS.c"
+ $192 = $70; //@line 74 "src/imu/MadgwickAHRS.c"
+ $193 = $191 * $192; //@line 74 "src/imu/MadgwickAHRS.c"
+ $55 = $193; //@line 74 "src/imu/MadgwickAHRS.c"
+ $194 = $70; //@line 75 "src/imu/MadgwickAHRS.c"
+ $195 = $71; //@line 75 "src/imu/MadgwickAHRS.c"
+ $196 = $194 * $195; //@line 75 "src/imu/MadgwickAHRS.c"
+ $56 = $196; //@line 75 "src/imu/MadgwickAHRS.c"
+ $197 = $70; //@line 76 "src/imu/MadgwickAHRS.c"
+ $198 = $72; //@line 76 "src/imu/MadgwickAHRS.c"
+ $199 = $197 * $198; //@line 76 "src/imu/MadgwickAHRS.c"
+ $57 = $199; //@line 76 "src/imu/MadgwickAHRS.c"
+ $200 = $70; //@line 77 "src/imu/MadgwickAHRS.c"
+ $201 = $73; //@line 77 "src/imu/MadgwickAHRS.c"
+ $202 = $200 * $201; //@line 77 "src/imu/MadgwickAHRS.c"
+ $58 = $202; //@line 77 "src/imu/MadgwickAHRS.c"
+ $203 = $71; //@line 78 "src/imu/MadgwickAHRS.c"
+ $204 = $71; //@line 78 "src/imu/MadgwickAHRS.c"
+ $205 = $203 * $204; //@line 78 "src/imu/MadgwickAHRS.c"
+ $59 = $205; //@line 78 "src/imu/MadgwickAHRS.c"
+ $206 = $71; //@line 79 "src/imu/MadgwickAHRS.c"
+ $207 = $72; //@line 79 "src/imu/MadgwickAHRS.c"
+ $208 = $206 * $207; //@line 79 "src/imu/MadgwickAHRS.c"
+ $60 = $208; //@line 79 "src/imu/MadgwickAHRS.c"
+ $209 = $71; //@line 80 "src/imu/MadgwickAHRS.c"
+ $210 = $73; //@line 80 "src/imu/MadgwickAHRS.c"
+ $211 = $209 * $210; //@line 80 "src/imu/MadgwickAHRS.c"
+ $61 = $211; //@line 80 "src/imu/MadgwickAHRS.c"
+ $212 = $72; //@line 81 "src/imu/MadgwickAHRS.c"
+ $213 = $72; //@line 81 "src/imu/MadgwickAHRS.c"
+ $214 = $212 * $213; //@line 81 "src/imu/MadgwickAHRS.c"
+ $62 = $214; //@line 81 "src/imu/MadgwickAHRS.c"
+ $215 = $72; //@line 82 "src/imu/MadgwickAHRS.c"
+ $216 = $73; //@line 82 "src/imu/MadgwickAHRS.c"
+ $217 = $215 * $216; //@line 82 "src/imu/MadgwickAHRS.c"
+ $63 = $217; //@line 82 "src/imu/MadgwickAHRS.c"
+ $218 = $73; //@line 83 "src/imu/MadgwickAHRS.c"
+ $219 = $73; //@line 83 "src/imu/MadgwickAHRS.c"
+ $220 = $218 * $219; //@line 83 "src/imu/MadgwickAHRS.c"
+ $64 = $220; //@line 83 "src/imu/MadgwickAHRS.c"
+ $221 = $70; //@line 84 "src/imu/MadgwickAHRS.c"
+ $222 = 4.0 * $221; //@line 84 "src/imu/MadgwickAHRS.c"
+ $65 = $222; //@line 84 "src/imu/MadgwickAHRS.c"
+ $223 = $71; //@line 85 "src/imu/MadgwickAHRS.c"
+ $224 = 4.0 * $223; //@line 85 "src/imu/MadgwickAHRS.c"
+ $66 = $224; //@line 85 "src/imu/MadgwickAHRS.c"
+ $225 = $72; //@line 86 "src/imu/MadgwickAHRS.c"
+ $226 = 4.0 * $225; //@line 86 "src/imu/MadgwickAHRS.c"
+ $67 = $226; //@line 86 "src/imu/MadgwickAHRS.c"
+ $227 = $71; //@line 87 "src/imu/MadgwickAHRS.c"
+ $228 = 8.0 * $227; //@line 87 "src/imu/MadgwickAHRS.c"
+ $68 = $228; //@line 87 "src/imu/MadgwickAHRS.c"
+ $229 = $72; //@line 88 "src/imu/MadgwickAHRS.c"
+ $230 = 8.0 * $229; //@line 88 "src/imu/MadgwickAHRS.c"
+ $69 = $230; //@line 88 "src/imu/MadgwickAHRS.c"
+ $231 = $19; //@line 91 "src/imu/MadgwickAHRS.c"
+ $232 = $55; //@line 91 "src/imu/MadgwickAHRS.c"
+ $233 = $231 * $232; //@line 91 "src/imu/MadgwickAHRS.c"
+ $234 = $42; //@line 91 "src/imu/MadgwickAHRS.c"
+ $235 = $73; //@line 91 "src/imu/MadgwickAHRS.c"
+ $236 = $234 * $235; //@line 91 "src/imu/MadgwickAHRS.c"
+ $237 = $233 - $236; //@line 91 "src/imu/MadgwickAHRS.c"
+ $238 = $43; //@line 91 "src/imu/MadgwickAHRS.c"
+ $239 = $72; //@line 91 "src/imu/MadgwickAHRS.c"
+ $240 = $238 * $239; //@line 91 "src/imu/MadgwickAHRS.c"
+ $241 = $237 + $240; //@line 91 "src/imu/MadgwickAHRS.c"
+ $242 = $19; //@line 91 "src/imu/MadgwickAHRS.c"
+ $243 = $59; //@line 91 "src/imu/MadgwickAHRS.c"
+ $244 = $242 * $243; //@line 91 "src/imu/MadgwickAHRS.c"
+ $245 = $241 + $244; //@line 91 "src/imu/MadgwickAHRS.c"
+ $246 = $50; //@line 91 "src/imu/MadgwickAHRS.c"
+ $247 = $20; //@line 91 "src/imu/MadgwickAHRS.c"
+ $248 = $246 * $247; //@line 91 "src/imu/MadgwickAHRS.c"
+ $249 = $72; //@line 91 "src/imu/MadgwickAHRS.c"
+ $250 = $248 * $249; //@line 91 "src/imu/MadgwickAHRS.c"
+ $251 = $245 + $250; //@line 91 "src/imu/MadgwickAHRS.c"
+ $252 = $50; //@line 91 "src/imu/MadgwickAHRS.c"
+ $253 = $21; //@line 91 "src/imu/MadgwickAHRS.c"
+ $254 = $252 * $253; //@line 91 "src/imu/MadgwickAHRS.c"
+ $255 = $73; //@line 91 "src/imu/MadgwickAHRS.c"
+ $256 = $254 * $255; //@line 91 "src/imu/MadgwickAHRS.c"
+ $257 = $251 + $256; //@line 91 "src/imu/MadgwickAHRS.c"
+ $258 = $19; //@line 91 "src/imu/MadgwickAHRS.c"
+ $259 = $62; //@line 91 "src/imu/MadgwickAHRS.c"
+ $260 = $258 * $259; //@line 91 "src/imu/MadgwickAHRS.c"
+ $261 = $257 - $260; //@line 91 "src/imu/MadgwickAHRS.c"
+ $262 = $19; //@line 91 "src/imu/MadgwickAHRS.c"
+ $263 = $64; //@line 91 "src/imu/MadgwickAHRS.c"
+ $264 = $262 * $263; //@line 91 "src/imu/MadgwickAHRS.c"
+ $265 = $261 - $264; //@line 91 "src/imu/MadgwickAHRS.c"
+ $39 = $265; //@line 91 "src/imu/MadgwickAHRS.c"
+ $266 = $41; //@line 92 "src/imu/MadgwickAHRS.c"
+ $267 = $73; //@line 92 "src/imu/MadgwickAHRS.c"
+ $268 = $266 * $267; //@line 92 "src/imu/MadgwickAHRS.c"
+ $269 = $20; //@line 92 "src/imu/MadgwickAHRS.c"
+ $270 = $55; //@line 92 "src/imu/MadgwickAHRS.c"
+ $271 = $269 * $270; //@line 92 "src/imu/MadgwickAHRS.c"
+ $272 = $268 + $271; //@line 92 "src/imu/MadgwickAHRS.c"
+ $273 = $43; //@line 92 "src/imu/MadgwickAHRS.c"
+ $274 = $71; //@line 92 "src/imu/MadgwickAHRS.c"
+ $275 = $273 * $274; //@line 92 "src/imu/MadgwickAHRS.c"
+ $276 = $272 - $275; //@line 92 "src/imu/MadgwickAHRS.c"
+ $277 = $44; //@line 92 "src/imu/MadgwickAHRS.c"
+ $278 = $72; //@line 92 "src/imu/MadgwickAHRS.c"
+ $279 = $277 * $278; //@line 92 "src/imu/MadgwickAHRS.c"
+ $280 = $276 + $279; //@line 92 "src/imu/MadgwickAHRS.c"
+ $281 = $20; //@line 92 "src/imu/MadgwickAHRS.c"
+ $282 = $59; //@line 92 "src/imu/MadgwickAHRS.c"
+ $283 = $281 * $282; //@line 92 "src/imu/MadgwickAHRS.c"
+ $284 = $280 - $283; //@line 92 "src/imu/MadgwickAHRS.c"
+ $285 = $20; //@line 92 "src/imu/MadgwickAHRS.c"
+ $286 = $62; //@line 92 "src/imu/MadgwickAHRS.c"
+ $287 = $285 * $286; //@line 92 "src/imu/MadgwickAHRS.c"
+ $288 = $284 + $287; //@line 92 "src/imu/MadgwickAHRS.c"
+ $289 = $51; //@line 92 "src/imu/MadgwickAHRS.c"
+ $290 = $21; //@line 92 "src/imu/MadgwickAHRS.c"
+ $291 = $289 * $290; //@line 92 "src/imu/MadgwickAHRS.c"
+ $292 = $73; //@line 92 "src/imu/MadgwickAHRS.c"
+ $293 = $291 * $292; //@line 92 "src/imu/MadgwickAHRS.c"
+ $294 = $288 + $293; //@line 92 "src/imu/MadgwickAHRS.c"
+ $295 = $20; //@line 92 "src/imu/MadgwickAHRS.c"
+ $296 = $64; //@line 92 "src/imu/MadgwickAHRS.c"
+ $297 = $295 * $296; //@line 92 "src/imu/MadgwickAHRS.c"
+ $298 = $294 - $297; //@line 92 "src/imu/MadgwickAHRS.c"
+ $40 = $298; //@line 92 "src/imu/MadgwickAHRS.c"
+ $299 = $39; //@line 93 "src/imu/MadgwickAHRS.c"
+ $300 = $39; //@line 93 "src/imu/MadgwickAHRS.c"
+ $301 = $299 * $300; //@line 93 "src/imu/MadgwickAHRS.c"
+ $302 = $40; //@line 93 "src/imu/MadgwickAHRS.c"
+ $303 = $40; //@line 93 "src/imu/MadgwickAHRS.c"
+ $304 = $302 * $303; //@line 93 "src/imu/MadgwickAHRS.c"
+ $305 = $301 + $304; //@line 93 "src/imu/MadgwickAHRS.c"
+ $306 = $305; //@line 93 "src/imu/MadgwickAHRS.c"
+ $307 = (+Math_sqrt((+$306))); //@line 93 "src/imu/MadgwickAHRS.c"
+ $308 = $307; //@line 93 "src/imu/MadgwickAHRS.c"
+ $45 = $308; //@line 93 "src/imu/MadgwickAHRS.c"
+ $309 = $41; //@line 94 "src/imu/MadgwickAHRS.c"
+ $310 = - $309; //@line 94 "src/imu/MadgwickAHRS.c"
+ $311 = $72; //@line 94 "src/imu/MadgwickAHRS.c"
+ $312 = $310 * $311; //@line 94 "src/imu/MadgwickAHRS.c"
+ $313 = $42; //@line 94 "src/imu/MadgwickAHRS.c"
+ $314 = $71; //@line 94 "src/imu/MadgwickAHRS.c"
+ $315 = $313 * $314; //@line 94 "src/imu/MadgwickAHRS.c"
+ $316 = $312 + $315; //@line 94 "src/imu/MadgwickAHRS.c"
+ $317 = $21; //@line 94 "src/imu/MadgwickAHRS.c"
+ $318 = $55; //@line 94 "src/imu/MadgwickAHRS.c"
+ $319 = $317 * $318; //@line 94 "src/imu/MadgwickAHRS.c"
+ $320 = $316 + $319; //@line 94 "src/imu/MadgwickAHRS.c"
+ $321 = $44; //@line 94 "src/imu/MadgwickAHRS.c"
+ $322 = $73; //@line 94 "src/imu/MadgwickAHRS.c"
+ $323 = $321 * $322; //@line 94 "src/imu/MadgwickAHRS.c"
+ $324 = $320 + $323; //@line 94 "src/imu/MadgwickAHRS.c"
+ $325 = $21; //@line 94 "src/imu/MadgwickAHRS.c"
+ $326 = $59; //@line 94 "src/imu/MadgwickAHRS.c"
+ $327 = $325 * $326; //@line 94 "src/imu/MadgwickAHRS.c"
+ $328 = $324 - $327; //@line 94 "src/imu/MadgwickAHRS.c"
+ $329 = $51; //@line 94 "src/imu/MadgwickAHRS.c"
+ $330 = $20; //@line 94 "src/imu/MadgwickAHRS.c"
+ $331 = $329 * $330; //@line 94 "src/imu/MadgwickAHRS.c"
+ $332 = $73; //@line 94 "src/imu/MadgwickAHRS.c"
+ $333 = $331 * $332; //@line 94 "src/imu/MadgwickAHRS.c"
+ $334 = $328 + $333; //@line 94 "src/imu/MadgwickAHRS.c"
+ $335 = $21; //@line 94 "src/imu/MadgwickAHRS.c"
+ $336 = $62; //@line 94 "src/imu/MadgwickAHRS.c"
+ $337 = $335 * $336; //@line 94 "src/imu/MadgwickAHRS.c"
+ $338 = $334 - $337; //@line 94 "src/imu/MadgwickAHRS.c"
+ $339 = $21; //@line 94 "src/imu/MadgwickAHRS.c"
+ $340 = $64; //@line 94 "src/imu/MadgwickAHRS.c"
+ $341 = $339 * $340; //@line 94 "src/imu/MadgwickAHRS.c"
+ $342 = $338 + $341; //@line 94 "src/imu/MadgwickAHRS.c"
+ $46 = $342; //@line 94 "src/imu/MadgwickAHRS.c"
+ $343 = $45; //@line 95 "src/imu/MadgwickAHRS.c"
+ $344 = 2.0 * $343; //@line 95 "src/imu/MadgwickAHRS.c"
+ $47 = $344; //@line 95 "src/imu/MadgwickAHRS.c"
+ $345 = $46; //@line 96 "src/imu/MadgwickAHRS.c"
+ $346 = 2.0 * $345; //@line 96 "src/imu/MadgwickAHRS.c"
+ $48 = $346; //@line 96 "src/imu/MadgwickAHRS.c"
+ $347 = $46; //@line 99 "src/imu/MadgwickAHRS.c"
+ $348 = - $347; //@line 99 "src/imu/MadgwickAHRS.c"
+ $349 = $72; //@line 99 "src/imu/MadgwickAHRS.c"
+ $350 = $348 * $349; //@line 99 "src/imu/MadgwickAHRS.c"
+ $351 = $45; //@line 99 "src/imu/MadgwickAHRS.c"
+ $352 = $62; //@line 99 "src/imu/MadgwickAHRS.c"
+ $353 = 0.5 - $352; //@line 99 "src/imu/MadgwickAHRS.c"
+ $354 = $64; //@line 99 "src/imu/MadgwickAHRS.c"
+ $355 = $353 - $354; //@line 99 "src/imu/MadgwickAHRS.c"
+ $356 = $351 * $355; //@line 99 "src/imu/MadgwickAHRS.c"
+ $357 = $46; //@line 99 "src/imu/MadgwickAHRS.c"
+ $358 = $61; //@line 99 "src/imu/MadgwickAHRS.c"
+ $359 = $57; //@line 99 "src/imu/MadgwickAHRS.c"
+ $360 = $358 - $359; //@line 99 "src/imu/MadgwickAHRS.c"
+ $361 = $357 * $360; //@line 99 "src/imu/MadgwickAHRS.c"
+ $362 = $356 + $361; //@line 99 "src/imu/MadgwickAHRS.c"
+ $363 = $19; //@line 99 "src/imu/MadgwickAHRS.c"
+ $364 = $362 - $363; //@line 99 "src/imu/MadgwickAHRS.c"
+ $365 = $350 * $364; //@line 99 "src/imu/MadgwickAHRS.c"
+ $366 = $45; //@line 99 "src/imu/MadgwickAHRS.c"
+ $367 = - $366; //@line 99 "src/imu/MadgwickAHRS.c"
+ $368 = $73; //@line 99 "src/imu/MadgwickAHRS.c"
+ $369 = $367 * $368; //@line 99 "src/imu/MadgwickAHRS.c"
+ $370 = $46; //@line 99 "src/imu/MadgwickAHRS.c"
+ $371 = $71; //@line 99 "src/imu/MadgwickAHRS.c"
+ $372 = $370 * $371; //@line 99 "src/imu/MadgwickAHRS.c"
+ $373 = $369 + $372; //@line 99 "src/imu/MadgwickAHRS.c"
+ $374 = $45; //@line 99 "src/imu/MadgwickAHRS.c"
+ $375 = $60; //@line 99 "src/imu/MadgwickAHRS.c"
+ $376 = $58; //@line 99 "src/imu/MadgwickAHRS.c"
+ $377 = $375 - $376; //@line 99 "src/imu/MadgwickAHRS.c"
+ $378 = $374 * $377; //@line 99 "src/imu/MadgwickAHRS.c"
+ $379 = $46; //@line 99 "src/imu/MadgwickAHRS.c"
+ $380 = $56; //@line 99 "src/imu/MadgwickAHRS.c"
+ $381 = $63; //@line 99 "src/imu/MadgwickAHRS.c"
+ $382 = $380 + $381; //@line 99 "src/imu/MadgwickAHRS.c"
+ $383 = $379 * $382; //@line 99 "src/imu/MadgwickAHRS.c"
+ $384 = $378 + $383; //@line 99 "src/imu/MadgwickAHRS.c"
+ $385 = $20; //@line 99 "src/imu/MadgwickAHRS.c"
+ $386 = $384 - $385; //@line 99 "src/imu/MadgwickAHRS.c"
+ $387 = $373 * $386; //@line 99 "src/imu/MadgwickAHRS.c"
+ $388 = $365 + $387; //@line 99 "src/imu/MadgwickAHRS.c"
+ $389 = $45; //@line 99 "src/imu/MadgwickAHRS.c"
+ $390 = $72; //@line 99 "src/imu/MadgwickAHRS.c"
+ $391 = $389 * $390; //@line 99 "src/imu/MadgwickAHRS.c"
+ $392 = $45; //@line 99 "src/imu/MadgwickAHRS.c"
+ $393 = $57; //@line 99 "src/imu/MadgwickAHRS.c"
+ $394 = $61; //@line 99 "src/imu/MadgwickAHRS.c"
+ $395 = $393 + $394; //@line 99 "src/imu/MadgwickAHRS.c"
+ $396 = $392 * $395; //@line 99 "src/imu/MadgwickAHRS.c"
+ $397 = $46; //@line 99 "src/imu/MadgwickAHRS.c"
+ $398 = $59; //@line 99 "src/imu/MadgwickAHRS.c"
+ $399 = 0.5 - $398; //@line 99 "src/imu/MadgwickAHRS.c"
+ $400 = $62; //@line 99 "src/imu/MadgwickAHRS.c"
+ $401 = $399 - $400; //@line 99 "src/imu/MadgwickAHRS.c"
+ $402 = $397 * $401; //@line 99 "src/imu/MadgwickAHRS.c"
+ $403 = $396 + $402; //@line 99 "src/imu/MadgwickAHRS.c"
+ $404 = $21; //@line 99 "src/imu/MadgwickAHRS.c"
+ $405 = $403 - $404; //@line 99 "src/imu/MadgwickAHRS.c"
+ $406 = $391 * $405; //@line 99 "src/imu/MadgwickAHRS.c"
+ $407 = $388 + $406; //@line 99 "src/imu/MadgwickAHRS.c"
+ $27 = $407; //@line 99 "src/imu/MadgwickAHRS.c"
+ $408 = $46; //@line 100 "src/imu/MadgwickAHRS.c"
+ $409 = $73; //@line 100 "src/imu/MadgwickAHRS.c"
+ $410 = $408 * $409; //@line 100 "src/imu/MadgwickAHRS.c"
+ $411 = $45; //@line 100 "src/imu/MadgwickAHRS.c"
+ $412 = $62; //@line 100 "src/imu/MadgwickAHRS.c"
+ $413 = 0.5 - $412; //@line 100 "src/imu/MadgwickAHRS.c"
+ $414 = $64; //@line 100 "src/imu/MadgwickAHRS.c"
+ $415 = $413 - $414; //@line 100 "src/imu/MadgwickAHRS.c"
+ $416 = $411 * $415; //@line 100 "src/imu/MadgwickAHRS.c"
+ $417 = $46; //@line 100 "src/imu/MadgwickAHRS.c"
+ $418 = $61; //@line 100 "src/imu/MadgwickAHRS.c"
+ $419 = $57; //@line 100 "src/imu/MadgwickAHRS.c"
+ $420 = $418 - $419; //@line 100 "src/imu/MadgwickAHRS.c"
+ $421 = $417 * $420; //@line 100 "src/imu/MadgwickAHRS.c"
+ $422 = $416 + $421; //@line 100 "src/imu/MadgwickAHRS.c"
+ $423 = $19; //@line 100 "src/imu/MadgwickAHRS.c"
+ $424 = $422 - $423; //@line 100 "src/imu/MadgwickAHRS.c"
+ $425 = $410 * $424; //@line 100 "src/imu/MadgwickAHRS.c"
+ $426 = $45; //@line 100 "src/imu/MadgwickAHRS.c"
+ $427 = $72; //@line 100 "src/imu/MadgwickAHRS.c"
+ $428 = $426 * $427; //@line 100 "src/imu/MadgwickAHRS.c"
+ $429 = $46; //@line 100 "src/imu/MadgwickAHRS.c"
+ $430 = $70; //@line 100 "src/imu/MadgwickAHRS.c"
+ $431 = $429 * $430; //@line 100 "src/imu/MadgwickAHRS.c"
+ $432 = $428 + $431; //@line 100 "src/imu/MadgwickAHRS.c"
+ $433 = $45; //@line 100 "src/imu/MadgwickAHRS.c"
+ $434 = $60; //@line 100 "src/imu/MadgwickAHRS.c"
+ $435 = $58; //@line 100 "src/imu/MadgwickAHRS.c"
+ $436 = $434 - $435; //@line 100 "src/imu/MadgwickAHRS.c"
+ $437 = $433 * $436; //@line 100 "src/imu/MadgwickAHRS.c"
+ $438 = $46; //@line 100 "src/imu/MadgwickAHRS.c"
+ $439 = $56; //@line 100 "src/imu/MadgwickAHRS.c"
+ $440 = $63; //@line 100 "src/imu/MadgwickAHRS.c"
+ $441 = $439 + $440; //@line 100 "src/imu/MadgwickAHRS.c"
+ $442 = $438 * $441; //@line 100 "src/imu/MadgwickAHRS.c"
+ $443 = $437 + $442; //@line 100 "src/imu/MadgwickAHRS.c"
+ $444 = $20; //@line 100 "src/imu/MadgwickAHRS.c"
+ $445 = $443 - $444; //@line 100 "src/imu/MadgwickAHRS.c"
+ $446 = $432 * $445; //@line 100 "src/imu/MadgwickAHRS.c"
+ $447 = $425 + $446; //@line 100 "src/imu/MadgwickAHRS.c"
+ $448 = $45; //@line 100 "src/imu/MadgwickAHRS.c"
+ $449 = $73; //@line 100 "src/imu/MadgwickAHRS.c"
+ $450 = $448 * $449; //@line 100 "src/imu/MadgwickAHRS.c"
+ $451 = $48; //@line 100 "src/imu/MadgwickAHRS.c"
+ $452 = $71; //@line 100 "src/imu/MadgwickAHRS.c"
+ $453 = $451 * $452; //@line 100 "src/imu/MadgwickAHRS.c"
+ $454 = $450 - $453; //@line 100 "src/imu/MadgwickAHRS.c"
+ $455 = $45; //@line 100 "src/imu/MadgwickAHRS.c"
+ $456 = $57; //@line 100 "src/imu/MadgwickAHRS.c"
+ $457 = $61; //@line 100 "src/imu/MadgwickAHRS.c"
+ $458 = $456 + $457; //@line 100 "src/imu/MadgwickAHRS.c"
+ $459 = $455 * $458; //@line 100 "src/imu/MadgwickAHRS.c"
+ $460 = $46; //@line 100 "src/imu/MadgwickAHRS.c"
+ $461 = $59; //@line 100 "src/imu/MadgwickAHRS.c"
+ $462 = 0.5 - $461; //@line 100 "src/imu/MadgwickAHRS.c"
+ $463 = $62; //@line 100 "src/imu/MadgwickAHRS.c"
+ $464 = $462 - $463; //@line 100 "src/imu/MadgwickAHRS.c"
+ $465 = $460 * $464; //@line 100 "src/imu/MadgwickAHRS.c"
+ $466 = $459 + $465; //@line 100 "src/imu/MadgwickAHRS.c"
+ $467 = $21; //@line 100 "src/imu/MadgwickAHRS.c"
+ $468 = $466 - $467; //@line 100 "src/imu/MadgwickAHRS.c"
+ $469 = $454 * $468; //@line 100 "src/imu/MadgwickAHRS.c"
+ $470 = $447 + $469; //@line 100 "src/imu/MadgwickAHRS.c"
+ $28 = $470; //@line 100 "src/imu/MadgwickAHRS.c"
+ $471 = $47; //@line 101 "src/imu/MadgwickAHRS.c"
+ $472 = - $471; //@line 101 "src/imu/MadgwickAHRS.c"
+ $473 = $72; //@line 101 "src/imu/MadgwickAHRS.c"
+ $474 = $472 * $473; //@line 101 "src/imu/MadgwickAHRS.c"
+ $475 = $46; //@line 101 "src/imu/MadgwickAHRS.c"
+ $476 = $70; //@line 101 "src/imu/MadgwickAHRS.c"
+ $477 = $475 * $476; //@line 101 "src/imu/MadgwickAHRS.c"
+ $478 = $474 - $477; //@line 101 "src/imu/MadgwickAHRS.c"
+ $479 = $45; //@line 101 "src/imu/MadgwickAHRS.c"
+ $480 = $62; //@line 101 "src/imu/MadgwickAHRS.c"
+ $481 = 0.5 - $480; //@line 101 "src/imu/MadgwickAHRS.c"
+ $482 = $64; //@line 101 "src/imu/MadgwickAHRS.c"
+ $483 = $481 - $482; //@line 101 "src/imu/MadgwickAHRS.c"
+ $484 = $479 * $483; //@line 101 "src/imu/MadgwickAHRS.c"
+ $485 = $46; //@line 101 "src/imu/MadgwickAHRS.c"
+ $486 = $61; //@line 101 "src/imu/MadgwickAHRS.c"
+ $487 = $57; //@line 101 "src/imu/MadgwickAHRS.c"
+ $488 = $486 - $487; //@line 101 "src/imu/MadgwickAHRS.c"
+ $489 = $485 * $488; //@line 101 "src/imu/MadgwickAHRS.c"
+ $490 = $484 + $489; //@line 101 "src/imu/MadgwickAHRS.c"
+ $491 = $19; //@line 101 "src/imu/MadgwickAHRS.c"
+ $492 = $490 - $491; //@line 101 "src/imu/MadgwickAHRS.c"
+ $493 = $478 * $492; //@line 101 "src/imu/MadgwickAHRS.c"
+ $494 = $45; //@line 101 "src/imu/MadgwickAHRS.c"
+ $495 = $71; //@line 101 "src/imu/MadgwickAHRS.c"
+ $496 = $494 * $495; //@line 101 "src/imu/MadgwickAHRS.c"
+ $497 = $46; //@line 101 "src/imu/MadgwickAHRS.c"
+ $498 = $73; //@line 101 "src/imu/MadgwickAHRS.c"
+ $499 = $497 * $498; //@line 101 "src/imu/MadgwickAHRS.c"
+ $500 = $496 + $499; //@line 101 "src/imu/MadgwickAHRS.c"
+ $501 = $45; //@line 101 "src/imu/MadgwickAHRS.c"
+ $502 = $60; //@line 101 "src/imu/MadgwickAHRS.c"
+ $503 = $58; //@line 101 "src/imu/MadgwickAHRS.c"
+ $504 = $502 - $503; //@line 101 "src/imu/MadgwickAHRS.c"
+ $505 = $501 * $504; //@line 101 "src/imu/MadgwickAHRS.c"
+ $506 = $46; //@line 101 "src/imu/MadgwickAHRS.c"
+ $507 = $56; //@line 101 "src/imu/MadgwickAHRS.c"
+ $508 = $63; //@line 101 "src/imu/MadgwickAHRS.c"
+ $509 = $507 + $508; //@line 101 "src/imu/MadgwickAHRS.c"
+ $510 = $506 * $509; //@line 101 "src/imu/MadgwickAHRS.c"
+ $511 = $505 + $510; //@line 101 "src/imu/MadgwickAHRS.c"
+ $512 = $20; //@line 101 "src/imu/MadgwickAHRS.c"
+ $513 = $511 - $512; //@line 101 "src/imu/MadgwickAHRS.c"
+ $514 = $500 * $513; //@line 101 "src/imu/MadgwickAHRS.c"
+ $515 = $493 + $514; //@line 101 "src/imu/MadgwickAHRS.c"
+ $516 = $45; //@line 101 "src/imu/MadgwickAHRS.c"
+ $517 = $70; //@line 101 "src/imu/MadgwickAHRS.c"
+ $518 = $516 * $517; //@line 101 "src/imu/MadgwickAHRS.c"
+ $519 = $48; //@line 101 "src/imu/MadgwickAHRS.c"
+ $520 = $72; //@line 101 "src/imu/MadgwickAHRS.c"
+ $521 = $519 * $520; //@line 101 "src/imu/MadgwickAHRS.c"
+ $522 = $518 - $521; //@line 101 "src/imu/MadgwickAHRS.c"
+ $523 = $45; //@line 101 "src/imu/MadgwickAHRS.c"
+ $524 = $57; //@line 101 "src/imu/MadgwickAHRS.c"
+ $525 = $61; //@line 101 "src/imu/MadgwickAHRS.c"
+ $526 = $524 + $525; //@line 101 "src/imu/MadgwickAHRS.c"
+ $527 = $523 * $526; //@line 101 "src/imu/MadgwickAHRS.c"
+ $528 = $46; //@line 101 "src/imu/MadgwickAHRS.c"
+ $529 = $59; //@line 101 "src/imu/MadgwickAHRS.c"
+ $530 = 0.5 - $529; //@line 101 "src/imu/MadgwickAHRS.c"
+ $531 = $62; //@line 101 "src/imu/MadgwickAHRS.c"
+ $532 = $530 - $531; //@line 101 "src/imu/MadgwickAHRS.c"
+ $533 = $528 * $532; //@line 101 "src/imu/MadgwickAHRS.c"
+ $534 = $527 + $533; //@line 101 "src/imu/MadgwickAHRS.c"
+ $535 = $21; //@line 101 "src/imu/MadgwickAHRS.c"
+ $536 = $534 - $535; //@line 101 "src/imu/MadgwickAHRS.c"
+ $537 = $522 * $536; //@line 101 "src/imu/MadgwickAHRS.c"
+ $538 = $515 + $537; //@line 101 "src/imu/MadgwickAHRS.c"
+ $29 = $538; //@line 101 "src/imu/MadgwickAHRS.c"
+ $539 = $47; //@line 102 "src/imu/MadgwickAHRS.c"
+ $540 = - $539; //@line 102 "src/imu/MadgwickAHRS.c"
+ $541 = $73; //@line 102 "src/imu/MadgwickAHRS.c"
+ $542 = $540 * $541; //@line 102 "src/imu/MadgwickAHRS.c"
+ $543 = $46; //@line 102 "src/imu/MadgwickAHRS.c"
+ $544 = $71; //@line 102 "src/imu/MadgwickAHRS.c"
+ $545 = $543 * $544; //@line 102 "src/imu/MadgwickAHRS.c"
+ $546 = $542 + $545; //@line 102 "src/imu/MadgwickAHRS.c"
+ $547 = $45; //@line 102 "src/imu/MadgwickAHRS.c"
+ $548 = $62; //@line 102 "src/imu/MadgwickAHRS.c"
+ $549 = 0.5 - $548; //@line 102 "src/imu/MadgwickAHRS.c"
+ $550 = $64; //@line 102 "src/imu/MadgwickAHRS.c"
+ $551 = $549 - $550; //@line 102 "src/imu/MadgwickAHRS.c"
+ $552 = $547 * $551; //@line 102 "src/imu/MadgwickAHRS.c"
+ $553 = $46; //@line 102 "src/imu/MadgwickAHRS.c"
+ $554 = $61; //@line 102 "src/imu/MadgwickAHRS.c"
+ $555 = $57; //@line 102 "src/imu/MadgwickAHRS.c"
+ $556 = $554 - $555; //@line 102 "src/imu/MadgwickAHRS.c"
+ $557 = $553 * $556; //@line 102 "src/imu/MadgwickAHRS.c"
+ $558 = $552 + $557; //@line 102 "src/imu/MadgwickAHRS.c"
+ $559 = $19; //@line 102 "src/imu/MadgwickAHRS.c"
+ $560 = $558 - $559; //@line 102 "src/imu/MadgwickAHRS.c"
+ $561 = $546 * $560; //@line 102 "src/imu/MadgwickAHRS.c"
+ $562 = $45; //@line 102 "src/imu/MadgwickAHRS.c"
+ $563 = - $562; //@line 102 "src/imu/MadgwickAHRS.c"
+ $564 = $70; //@line 102 "src/imu/MadgwickAHRS.c"
+ $565 = $563 * $564; //@line 102 "src/imu/MadgwickAHRS.c"
+ $566 = $46; //@line 102 "src/imu/MadgwickAHRS.c"
+ $567 = $72; //@line 102 "src/imu/MadgwickAHRS.c"
+ $568 = $566 * $567; //@line 102 "src/imu/MadgwickAHRS.c"
+ $569 = $565 + $568; //@line 102 "src/imu/MadgwickAHRS.c"
+ $570 = $45; //@line 102 "src/imu/MadgwickAHRS.c"
+ $571 = $60; //@line 102 "src/imu/MadgwickAHRS.c"
+ $572 = $58; //@line 102 "src/imu/MadgwickAHRS.c"
+ $573 = $571 - $572; //@line 102 "src/imu/MadgwickAHRS.c"
+ $574 = $570 * $573; //@line 102 "src/imu/MadgwickAHRS.c"
+ $575 = $46; //@line 102 "src/imu/MadgwickAHRS.c"
+ $576 = $56; //@line 102 "src/imu/MadgwickAHRS.c"
+ $577 = $63; //@line 102 "src/imu/MadgwickAHRS.c"
+ $578 = $576 + $577; //@line 102 "src/imu/MadgwickAHRS.c"
+ $579 = $575 * $578; //@line 102 "src/imu/MadgwickAHRS.c"
+ $580 = $574 + $579; //@line 102 "src/imu/MadgwickAHRS.c"
+ $581 = $20; //@line 102 "src/imu/MadgwickAHRS.c"
+ $582 = $580 - $581; //@line 102 "src/imu/MadgwickAHRS.c"
+ $583 = $569 * $582; //@line 102 "src/imu/MadgwickAHRS.c"
+ $584 = $561 + $583; //@line 102 "src/imu/MadgwickAHRS.c"
+ $585 = $45; //@line 102 "src/imu/MadgwickAHRS.c"
+ $586 = $71; //@line 102 "src/imu/MadgwickAHRS.c"
+ $587 = $585 * $586; //@line 102 "src/imu/MadgwickAHRS.c"
+ $588 = $45; //@line 102 "src/imu/MadgwickAHRS.c"
+ $589 = $57; //@line 102 "src/imu/MadgwickAHRS.c"
+ $590 = $61; //@line 102 "src/imu/MadgwickAHRS.c"
+ $591 = $589 + $590; //@line 102 "src/imu/MadgwickAHRS.c"
+ $592 = $588 * $591; //@line 102 "src/imu/MadgwickAHRS.c"
+ $593 = $46; //@line 102 "src/imu/MadgwickAHRS.c"
+ $594 = $59; //@line 102 "src/imu/MadgwickAHRS.c"
+ $595 = 0.5 - $594; //@line 102 "src/imu/MadgwickAHRS.c"
+ $596 = $62; //@line 102 "src/imu/MadgwickAHRS.c"
+ $597 = $595 - $596; //@line 102 "src/imu/MadgwickAHRS.c"
+ $598 = $593 * $597; //@line 102 "src/imu/MadgwickAHRS.c"
+ $599 = $592 + $598; //@line 102 "src/imu/MadgwickAHRS.c"
+ $600 = $21; //@line 102 "src/imu/MadgwickAHRS.c"
+ $601 = $599 - $600; //@line 102 "src/imu/MadgwickAHRS.c"
+ $602 = $587 * $601; //@line 102 "src/imu/MadgwickAHRS.c"
+ $603 = $584 + $602; //@line 102 "src/imu/MadgwickAHRS.c"
+ $30 = $603; //@line 102 "src/imu/MadgwickAHRS.c"
+ $604 = $27; //@line 103 "src/imu/MadgwickAHRS.c"
+ $605 = $27; //@line 103 "src/imu/MadgwickAHRS.c"
+ $606 = $604 * $605; //@line 103 "src/imu/MadgwickAHRS.c"
+ $607 = $28; //@line 103 "src/imu/MadgwickAHRS.c"
+ $608 = $28; //@line 103 "src/imu/MadgwickAHRS.c"
+ $609 = $607 * $608; //@line 103 "src/imu/MadgwickAHRS.c"
+ $610 = $606 + $609; //@line 103 "src/imu/MadgwickAHRS.c"
+ $611 = $29; //@line 103 "src/imu/MadgwickAHRS.c"
+ $612 = $29; //@line 103 "src/imu/MadgwickAHRS.c"
+ $613 = $611 * $612; //@line 103 "src/imu/MadgwickAHRS.c"
+ $614 = $610 + $613; //@line 103 "src/imu/MadgwickAHRS.c"
+ $615 = $30; //@line 103 "src/imu/MadgwickAHRS.c"
+ $616 = $30; //@line 103 "src/imu/MadgwickAHRS.c"
+ $617 = $615 * $616; //@line 103 "src/imu/MadgwickAHRS.c"
+ $618 = $614 + $617; //@line 103 "src/imu/MadgwickAHRS.c"
+ $619 = (+_invSqrt($618)); //@line 103 "src/imu/MadgwickAHRS.c"
+ $26 = $619; //@line 103 "src/imu/MadgwickAHRS.c"
+ $620 = $26; //@line 104 "src/imu/MadgwickAHRS.c"
+ $621 = $27; //@line 104 "src/imu/MadgwickAHRS.c"
+ $622 = $621 * $620; //@line 104 "src/imu/MadgwickAHRS.c"
+ $27 = $622; //@line 104 "src/imu/MadgwickAHRS.c"
+ $623 = $26; //@line 105 "src/imu/MadgwickAHRS.c"
+ $624 = $28; //@line 105 "src/imu/MadgwickAHRS.c"
+ $625 = $624 * $623; //@line 105 "src/imu/MadgwickAHRS.c"
+ $28 = $625; //@line 105 "src/imu/MadgwickAHRS.c"
+ $626 = $26; //@line 106 "src/imu/MadgwickAHRS.c"
+ $627 = $29; //@line 106 "src/imu/MadgwickAHRS.c"
+ $628 = $627 * $626; //@line 106 "src/imu/MadgwickAHRS.c"
+ $29 = $628; //@line 106 "src/imu/MadgwickAHRS.c"
+ $629 = $26; //@line 107 "src/imu/MadgwickAHRS.c"
+ $630 = $30; //@line 107 "src/imu/MadgwickAHRS.c"
+ $631 = $630 * $629; //@line 107 "src/imu/MadgwickAHRS.c"
+ $30 = $631; //@line 107 "src/imu/MadgwickAHRS.c"
+ $632 = $65; //@line 110 "src/imu/MadgwickAHRS.c"
+ $633 = $62; //@line 110 "src/imu/MadgwickAHRS.c"
+ $634 = $632 * $633; //@line 110 "src/imu/MadgwickAHRS.c"
+ $635 = $51; //@line 110 "src/imu/MadgwickAHRS.c"
+ $636 = $16; //@line 110 "src/imu/MadgwickAHRS.c"
+ $637 = $635 * $636; //@line 110 "src/imu/MadgwickAHRS.c"
+ $638 = $634 + $637; //@line 110 "src/imu/MadgwickAHRS.c"
+ $639 = $65; //@line 110 "src/imu/MadgwickAHRS.c"
+ $640 = $59; //@line 110 "src/imu/MadgwickAHRS.c"
+ $641 = $639 * $640; //@line 110 "src/imu/MadgwickAHRS.c"
+ $642 = $638 + $641; //@line 110 "src/imu/MadgwickAHRS.c"
+ $643 = $50; //@line 110 "src/imu/MadgwickAHRS.c"
+ $644 = $17; //@line 110 "src/imu/MadgwickAHRS.c"
+ $645 = $643 * $644; //@line 110 "src/imu/MadgwickAHRS.c"
+ $646 = $642 - $645; //@line 110 "src/imu/MadgwickAHRS.c"
+ $31 = $646; //@line 110 "src/imu/MadgwickAHRS.c"
+ $647 = $66; //@line 111 "src/imu/MadgwickAHRS.c"
+ $648 = $64; //@line 111 "src/imu/MadgwickAHRS.c"
+ $649 = $647 * $648; //@line 111 "src/imu/MadgwickAHRS.c"
+ $650 = $52; //@line 111 "src/imu/MadgwickAHRS.c"
+ $651 = $16; //@line 111 "src/imu/MadgwickAHRS.c"
+ $652 = $650 * $651; //@line 111 "src/imu/MadgwickAHRS.c"
+ $653 = $649 - $652; //@line 111 "src/imu/MadgwickAHRS.c"
+ $654 = $55; //@line 111 "src/imu/MadgwickAHRS.c"
+ $655 = 4.0 * $654; //@line 111 "src/imu/MadgwickAHRS.c"
+ $656 = $71; //@line 111 "src/imu/MadgwickAHRS.c"
+ $657 = $655 * $656; //@line 111 "src/imu/MadgwickAHRS.c"
+ $658 = $653 + $657; //@line 111 "src/imu/MadgwickAHRS.c"
+ $659 = $49; //@line 111 "src/imu/MadgwickAHRS.c"
+ $660 = $17; //@line 111 "src/imu/MadgwickAHRS.c"
+ $661 = $659 * $660; //@line 111 "src/imu/MadgwickAHRS.c"
+ $662 = $658 - $661; //@line 111 "src/imu/MadgwickAHRS.c"
+ $663 = $66; //@line 111 "src/imu/MadgwickAHRS.c"
+ $664 = $662 - $663; //@line 111 "src/imu/MadgwickAHRS.c"
+ $665 = $68; //@line 111 "src/imu/MadgwickAHRS.c"
+ $666 = $59; //@line 111 "src/imu/MadgwickAHRS.c"
+ $667 = $665 * $666; //@line 111 "src/imu/MadgwickAHRS.c"
+ $668 = $664 + $667; //@line 111 "src/imu/MadgwickAHRS.c"
+ $669 = $68; //@line 111 "src/imu/MadgwickAHRS.c"
+ $670 = $62; //@line 111 "src/imu/MadgwickAHRS.c"
+ $671 = $669 * $670; //@line 111 "src/imu/MadgwickAHRS.c"
+ $672 = $668 + $671; //@line 111 "src/imu/MadgwickAHRS.c"
+ $673 = $66; //@line 111 "src/imu/MadgwickAHRS.c"
+ $674 = $18; //@line 111 "src/imu/MadgwickAHRS.c"
+ $675 = $673 * $674; //@line 111 "src/imu/MadgwickAHRS.c"
+ $676 = $672 + $675; //@line 111 "src/imu/MadgwickAHRS.c"
+ $32 = $676; //@line 111 "src/imu/MadgwickAHRS.c"
+ $677 = $55; //@line 112 "src/imu/MadgwickAHRS.c"
+ $678 = 4.0 * $677; //@line 112 "src/imu/MadgwickAHRS.c"
+ $679 = $72; //@line 112 "src/imu/MadgwickAHRS.c"
+ $680 = $678 * $679; //@line 112 "src/imu/MadgwickAHRS.c"
+ $681 = $49; //@line 112 "src/imu/MadgwickAHRS.c"
+ $682 = $16; //@line 112 "src/imu/MadgwickAHRS.c"
+ $683 = $681 * $682; //@line 112 "src/imu/MadgwickAHRS.c"
+ $684 = $680 + $683; //@line 112 "src/imu/MadgwickAHRS.c"
+ $685 = $67; //@line 112 "src/imu/MadgwickAHRS.c"
+ $686 = $64; //@line 112 "src/imu/MadgwickAHRS.c"
+ $687 = $685 * $686; //@line 112 "src/imu/MadgwickAHRS.c"
+ $688 = $684 + $687; //@line 112 "src/imu/MadgwickAHRS.c"
+ $689 = $52; //@line 112 "src/imu/MadgwickAHRS.c"
+ $690 = $17; //@line 112 "src/imu/MadgwickAHRS.c"
+ $691 = $689 * $690; //@line 112 "src/imu/MadgwickAHRS.c"
+ $692 = $688 - $691; //@line 112 "src/imu/MadgwickAHRS.c"
+ $693 = $67; //@line 112 "src/imu/MadgwickAHRS.c"
+ $694 = $692 - $693; //@line 112 "src/imu/MadgwickAHRS.c"
+ $695 = $69; //@line 112 "src/imu/MadgwickAHRS.c"
+ $696 = $59; //@line 112 "src/imu/MadgwickAHRS.c"
+ $697 = $695 * $696; //@line 112 "src/imu/MadgwickAHRS.c"
+ $698 = $694 + $697; //@line 112 "src/imu/MadgwickAHRS.c"
+ $699 = $69; //@line 112 "src/imu/MadgwickAHRS.c"
+ $700 = $62; //@line 112 "src/imu/MadgwickAHRS.c"
+ $701 = $699 * $700; //@line 112 "src/imu/MadgwickAHRS.c"
+ $702 = $698 + $701; //@line 112 "src/imu/MadgwickAHRS.c"
+ $703 = $67; //@line 112 "src/imu/MadgwickAHRS.c"
+ $704 = $18; //@line 112 "src/imu/MadgwickAHRS.c"
+ $705 = $703 * $704; //@line 112 "src/imu/MadgwickAHRS.c"
+ $706 = $702 + $705; //@line 112 "src/imu/MadgwickAHRS.c"
+ $33 = $706; //@line 112 "src/imu/MadgwickAHRS.c"
+ $707 = $59; //@line 113 "src/imu/MadgwickAHRS.c"
+ $708 = 4.0 * $707; //@line 113 "src/imu/MadgwickAHRS.c"
+ $709 = $73; //@line 113 "src/imu/MadgwickAHRS.c"
+ $710 = $708 * $709; //@line 113 "src/imu/MadgwickAHRS.c"
+ $711 = $50; //@line 113 "src/imu/MadgwickAHRS.c"
+ $712 = $16; //@line 113 "src/imu/MadgwickAHRS.c"
+ $713 = $711 * $712; //@line 113 "src/imu/MadgwickAHRS.c"
+ $714 = $710 - $713; //@line 113 "src/imu/MadgwickAHRS.c"
+ $715 = $62; //@line 113 "src/imu/MadgwickAHRS.c"
+ $716 = 4.0 * $715; //@line 113 "src/imu/MadgwickAHRS.c"
+ $717 = $73; //@line 113 "src/imu/MadgwickAHRS.c"
+ $718 = $716 * $717; //@line 113 "src/imu/MadgwickAHRS.c"
+ $719 = $714 + $718; //@line 113 "src/imu/MadgwickAHRS.c"
+ $720 = $51; //@line 113 "src/imu/MadgwickAHRS.c"
+ $721 = $17; //@line 113 "src/imu/MadgwickAHRS.c"
+ $722 = $720 * $721; //@line 113 "src/imu/MadgwickAHRS.c"
+ $723 = $719 - $722; //@line 113 "src/imu/MadgwickAHRS.c"
+ $34 = $723; //@line 113 "src/imu/MadgwickAHRS.c"
+ $724 = $31; //@line 114 "src/imu/MadgwickAHRS.c"
+ $725 = $31; //@line 114 "src/imu/MadgwickAHRS.c"
+ $726 = $724 * $725; //@line 114 "src/imu/MadgwickAHRS.c"
+ $727 = $32; //@line 114 "src/imu/MadgwickAHRS.c"
+ $728 = $32; //@line 114 "src/imu/MadgwickAHRS.c"
+ $729 = $727 * $728; //@line 114 "src/imu/MadgwickAHRS.c"
+ $730 = $726 + $729; //@line 114 "src/imu/MadgwickAHRS.c"
+ $731 = $33; //@line 114 "src/imu/MadgwickAHRS.c"
+ $732 = $33; //@line 114 "src/imu/MadgwickAHRS.c"
+ $733 = $731 * $732; //@line 114 "src/imu/MadgwickAHRS.c"
+ $734 = $730 + $733; //@line 114 "src/imu/MadgwickAHRS.c"
+ $735 = $34; //@line 114 "src/imu/MadgwickAHRS.c"
+ $736 = $34; //@line 114 "src/imu/MadgwickAHRS.c"
+ $737 = $735 * $736; //@line 114 "src/imu/MadgwickAHRS.c"
+ $738 = $734 + $737; //@line 114 "src/imu/MadgwickAHRS.c"
+ $739 = (+_invSqrt($738)); //@line 114 "src/imu/MadgwickAHRS.c"
+ $26 = $739; //@line 114 "src/imu/MadgwickAHRS.c"
+ $740 = $26; //@line 115 "src/imu/MadgwickAHRS.c"
+ $741 = $31; //@line 115 "src/imu/MadgwickAHRS.c"
+ $742 = $741 * $740; //@line 115 "src/imu/MadgwickAHRS.c"
+ $31 = $742; //@line 115 "src/imu/MadgwickAHRS.c"
+ $743 = $26; //@line 116 "src/imu/MadgwickAHRS.c"
+ $744 = $32; //@line 116 "src/imu/MadgwickAHRS.c"
+ $745 = $744 * $743; //@line 116 "src/imu/MadgwickAHRS.c"
+ $32 = $745; //@line 116 "src/imu/MadgwickAHRS.c"
+ $746 = $26; //@line 117 "src/imu/MadgwickAHRS.c"
+ $747 = $33; //@line 117 "src/imu/MadgwickAHRS.c"
+ $748 = $747 * $746; //@line 117 "src/imu/MadgwickAHRS.c"
+ $33 = $748; //@line 117 "src/imu/MadgwickAHRS.c"
+ $749 = $26; //@line 118 "src/imu/MadgwickAHRS.c"
+ $750 = $34; //@line 118 "src/imu/MadgwickAHRS.c"
+ $751 = $750 * $749; //@line 118 "src/imu/MadgwickAHRS.c"
+ $34 = $751; //@line 118 "src/imu/MadgwickAHRS.c"
+ $752 = $75; //@line 121 "src/imu/MadgwickAHRS.c"
+ $753 = $27; //@line 121 "src/imu/MadgwickAHRS.c"
+ $754 = $752 * $753; //@line 121 "src/imu/MadgwickAHRS.c"
+ $755 = $74; //@line 121 "src/imu/MadgwickAHRS.c"
+ $756 = $31; //@line 121 "src/imu/MadgwickAHRS.c"
+ $757 = $755 * $756; //@line 121 "src/imu/MadgwickAHRS.c"
+ $758 = $754 + $757; //@line 121 "src/imu/MadgwickAHRS.c"
+ $759 = $35; //@line 121 "src/imu/MadgwickAHRS.c"
+ $760 = $759 - $758; //@line 121 "src/imu/MadgwickAHRS.c"
+ $35 = $760; //@line 121 "src/imu/MadgwickAHRS.c"
+ $761 = $75; //@line 122 "src/imu/MadgwickAHRS.c"
+ $762 = $28; //@line 122 "src/imu/MadgwickAHRS.c"
+ $763 = $761 * $762; //@line 122 "src/imu/MadgwickAHRS.c"
+ $764 = $74; //@line 122 "src/imu/MadgwickAHRS.c"
+ $765 = $32; //@line 122 "src/imu/MadgwickAHRS.c"
+ $766 = $764 * $765; //@line 122 "src/imu/MadgwickAHRS.c"
+ $767 = $763 + $766; //@line 122 "src/imu/MadgwickAHRS.c"
+ $768 = $36; //@line 122 "src/imu/MadgwickAHRS.c"
+ $769 = $768 - $767; //@line 122 "src/imu/MadgwickAHRS.c"
+ $36 = $769; //@line 122 "src/imu/MadgwickAHRS.c"
+ $770 = $75; //@line 123 "src/imu/MadgwickAHRS.c"
+ $771 = $29; //@line 123 "src/imu/MadgwickAHRS.c"
+ $772 = $770 * $771; //@line 123 "src/imu/MadgwickAHRS.c"
+ $773 = $74; //@line 123 "src/imu/MadgwickAHRS.c"
+ $774 = $33; //@line 123 "src/imu/MadgwickAHRS.c"
+ $775 = $773 * $774; //@line 123 "src/imu/MadgwickAHRS.c"
+ $776 = $772 + $775; //@line 123 "src/imu/MadgwickAHRS.c"
+ $777 = $37; //@line 123 "src/imu/MadgwickAHRS.c"
+ $778 = $777 - $776; //@line 123 "src/imu/MadgwickAHRS.c"
+ $37 = $778; //@line 123 "src/imu/MadgwickAHRS.c"
+ $779 = $75; //@line 124 "src/imu/MadgwickAHRS.c"
+ $780 = $30; //@line 124 "src/imu/MadgwickAHRS.c"
+ $781 = $779 * $780; //@line 124 "src/imu/MadgwickAHRS.c"
+ $782 = $74; //@line 124 "src/imu/MadgwickAHRS.c"
+ $783 = $34; //@line 124 "src/imu/MadgwickAHRS.c"
+ $784 = $782 * $783; //@line 124 "src/imu/MadgwickAHRS.c"
+ $785 = $781 + $784; //@line 124 "src/imu/MadgwickAHRS.c"
+ $786 = $38; //@line 124 "src/imu/MadgwickAHRS.c"
+ $787 = $786 - $785; //@line 124 "src/imu/MadgwickAHRS.c"
+ $38 = $787; //@line 124 "src/imu/MadgwickAHRS.c"
+ $788 = $35; //@line 127 "src/imu/MadgwickAHRS.c"
+ $789 = $22; //@line 127 "src/imu/MadgwickAHRS.c"
+ $790 = $788 * $789; //@line 127 "src/imu/MadgwickAHRS.c"
+ $791 = $70; //@line 127 "src/imu/MadgwickAHRS.c"
+ $792 = $791 + $790; //@line 127 "src/imu/MadgwickAHRS.c"
+ $70 = $792; //@line 127 "src/imu/MadgwickAHRS.c"
+ $793 = $36; //@line 128 "src/imu/MadgwickAHRS.c"
+ $794 = $22; //@line 128 "src/imu/MadgwickAHRS.c"
+ $795 = $793 * $794; //@line 128 "src/imu/MadgwickAHRS.c"
+ $796 = $71; //@line 128 "src/imu/MadgwickAHRS.c"
+ $797 = $796 + $795; //@line 128 "src/imu/MadgwickAHRS.c"
+ $71 = $797; //@line 128 "src/imu/MadgwickAHRS.c"
+ $798 = $37; //@line 129 "src/imu/MadgwickAHRS.c"
+ $799 = $22; //@line 129 "src/imu/MadgwickAHRS.c"
+ $800 = $798 * $799; //@line 129 "src/imu/MadgwickAHRS.c"
+ $801 = $72; //@line 129 "src/imu/MadgwickAHRS.c"
+ $802 = $801 + $800; //@line 129 "src/imu/MadgwickAHRS.c"
+ $72 = $802; //@line 129 "src/imu/MadgwickAHRS.c"
+ $803 = $38; //@line 130 "src/imu/MadgwickAHRS.c"
+ $804 = $22; //@line 130 "src/imu/MadgwickAHRS.c"
+ $805 = $803 * $804; //@line 130 "src/imu/MadgwickAHRS.c"
+ $806 = $73; //@line 130 "src/imu/MadgwickAHRS.c"
+ $807 = $806 + $805; //@line 130 "src/imu/MadgwickAHRS.c"
+ $73 = $807; //@line 130 "src/imu/MadgwickAHRS.c"
+ $808 = $70; //@line 133 "src/imu/MadgwickAHRS.c"
+ $809 = $70; //@line 133 "src/imu/MadgwickAHRS.c"
+ $810 = $808 * $809; //@line 133 "src/imu/MadgwickAHRS.c"
+ $811 = $71; //@line 133 "src/imu/MadgwickAHRS.c"
+ $812 = $71; //@line 133 "src/imu/MadgwickAHRS.c"
+ $813 = $811 * $812; //@line 133 "src/imu/MadgwickAHRS.c"
+ $814 = $810 + $813; //@line 133 "src/imu/MadgwickAHRS.c"
+ $815 = $72; //@line 133 "src/imu/MadgwickAHRS.c"
+ $816 = $72; //@line 133 "src/imu/MadgwickAHRS.c"
+ $817 = $815 * $816; //@line 133 "src/imu/MadgwickAHRS.c"
+ $818 = $814 + $817; //@line 133 "src/imu/MadgwickAHRS.c"
+ $819 = $73; //@line 133 "src/imu/MadgwickAHRS.c"
+ $820 = $73; //@line 133 "src/imu/MadgwickAHRS.c"
+ $821 = $819 * $820; //@line 133 "src/imu/MadgwickAHRS.c"
+ $822 = $818 + $821; //@line 133 "src/imu/MadgwickAHRS.c"
+ $823 = (+_invSqrt($822)); //@line 133 "src/imu/MadgwickAHRS.c"
+ $26 = $823; //@line 133 "src/imu/MadgwickAHRS.c"
+ $824 = $26; //@line 134 "src/imu/MadgwickAHRS.c"
+ $825 = $70; //@line 134 "src/imu/MadgwickAHRS.c"
+ $826 = $825 * $824; //@line 134 "src/imu/MadgwickAHRS.c"
+ $70 = $826; //@line 134 "src/imu/MadgwickAHRS.c"
+ $827 = $26; //@line 135 "src/imu/MadgwickAHRS.c"
+ $828 = $71; //@line 135 "src/imu/MadgwickAHRS.c"
+ $829 = $828 * $827; //@line 135 "src/imu/MadgwickAHRS.c"
+ $71 = $829; //@line 135 "src/imu/MadgwickAHRS.c"
+ $830 = $26; //@line 136 "src/imu/MadgwickAHRS.c"
+ $831 = $72; //@line 136 "src/imu/MadgwickAHRS.c"
+ $832 = $831 * $830; //@line 136 "src/imu/MadgwickAHRS.c"
+ $72 = $832; //@line 136 "src/imu/MadgwickAHRS.c"
+ $833 = $26; //@line 137 "src/imu/MadgwickAHRS.c"
+ $834 = $73; //@line 137 "src/imu/MadgwickAHRS.c"
+ $835 = $834 * $833; //@line 137 "src/imu/MadgwickAHRS.c"
+ $73 = $835; //@line 137 "src/imu/MadgwickAHRS.c"
+ $836 = $70; //@line 140 "src/imu/MadgwickAHRS.c"
+ $837 = $25; //@line 140 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$837>>2] = $836; //@line 140 "src/imu/MadgwickAHRS.c"
+ $838 = $71; //@line 141 "src/imu/MadgwickAHRS.c"
+ $839 = $25; //@line 141 "src/imu/MadgwickAHRS.c"
+ $840 = ((($839)) + 4|0); //@line 141 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$840>>2] = $838; //@line 141 "src/imu/MadgwickAHRS.c"
+ $841 = $72; //@line 142 "src/imu/MadgwickAHRS.c"
+ $842 = $25; //@line 142 "src/imu/MadgwickAHRS.c"
+ $843 = ((($842)) + 8|0); //@line 142 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$843>>2] = $841; //@line 142 "src/imu/MadgwickAHRS.c"
+ $844 = $73; //@line 143 "src/imu/MadgwickAHRS.c"
+ $845 = $25; //@line 143 "src/imu/MadgwickAHRS.c"
+ $846 = ((($845)) + 12|0); //@line 143 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$846>>2] = $844; //@line 143 "src/imu/MadgwickAHRS.c"
+ STACKTOP = sp;return; //@line 144 "src/imu/MadgwickAHRS.c"
 }
-function _imu_ekf_update($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $10 = 0, $11 = 0.0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $2 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0;
- var $29 = 0, $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0.0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0;
- var $47 = 0, $48 = 0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
+function _invSqrt($0) {
+ $0 = +$0;
+ var $1 = 0.0, $10 = 0, $11 = 0, $12 = 0.0, $13 = 0.0, $14 = 0.0, $15 = 0.0, $16 = 0.0, $17 = 0.0, $18 = 0.0, $19 = 0.0, $2 = 0.0, $20 = 0.0, $21 = 0.0, $3 = 0, $4 = 0, $5 = 0.0, $6 = 0.0, $7 = 0.0, $8 = 0;
+ var $9 = 0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $2 = $0;
- $3 = $1;
- $4 = 0; //@line 54 "../../src/imu/imu_ekf.c"
- while(1) {
-  $5 = $4; //@line 54 "../../src/imu/imu_ekf.c"
-  $6 = ($5|0)<(3); //@line 54 "../../src/imu/imu_ekf.c"
-  if (!($6)) {
-   break;
-  }
-  $7 = $2; //@line 55 "../../src/imu/imu_ekf.c"
-  $8 = ((($7)) + 8|0); //@line 55 "../../src/imu/imu_ekf.c"
-  $9 = $4; //@line 55 "../../src/imu/imu_ekf.c"
-  $10 = (($8) + ($9<<3)|0); //@line 55 "../../src/imu/imu_ekf.c"
-  $11 = +HEAPF64[$10>>3]; //@line 55 "../../src/imu/imu_ekf.c"
-  $12 = $2; //@line 55 "../../src/imu/imu_ekf.c"
-  $13 = ((($12)) + 680|0); //@line 55 "../../src/imu/imu_ekf.c"
-  $14 = $4; //@line 55 "../../src/imu/imu_ekf.c"
-  $15 = (($13) + ($14<<3)|0); //@line 55 "../../src/imu/imu_ekf.c"
-  HEAPF64[$15>>3] = $11; //@line 55 "../../src/imu/imu_ekf.c"
-  $16 = $4; //@line 54 "../../src/imu/imu_ekf.c"
-  $17 = (($16) + 1)|0; //@line 54 "../../src/imu/imu_ekf.c"
-  $4 = $17; //@line 54 "../../src/imu/imu_ekf.c"
- }
- $4 = 0; //@line 58 "../../src/imu/imu_ekf.c"
- while(1) {
-  $18 = $4; //@line 58 "../../src/imu/imu_ekf.c"
-  $19 = ($18|0)<(3); //@line 58 "../../src/imu/imu_ekf.c"
-  if (!($19)) {
-   break;
-  }
-  $20 = $2; //@line 59 "../../src/imu/imu_ekf.c"
-  $21 = ((($20)) + 320|0); //@line 59 "../../src/imu/imu_ekf.c"
-  $22 = $4; //@line 59 "../../src/imu/imu_ekf.c"
-  $23 = (($21) + (($22*24)|0)|0); //@line 59 "../../src/imu/imu_ekf.c"
-  $24 = $4; //@line 59 "../../src/imu/imu_ekf.c"
-  $25 = (($23) + ($24<<3)|0); //@line 59 "../../src/imu/imu_ekf.c"
-  HEAPF64[$25>>3] = 1.0; //@line 59 "../../src/imu/imu_ekf.c"
-  $26 = $4; //@line 58 "../../src/imu/imu_ekf.c"
-  $27 = (($26) + 1)|0; //@line 58 "../../src/imu/imu_ekf.c"
-  $4 = $27; //@line 58 "../../src/imu/imu_ekf.c"
- }
- $4 = 0; //@line 63 "../../src/imu/imu_ekf.c"
- while(1) {
-  $28 = $4; //@line 63 "../../src/imu/imu_ekf.c"
-  $29 = ($28|0)<(3); //@line 63 "../../src/imu/imu_ekf.c"
-  if (!($29)) {
-   break;
-  }
-  $30 = $2; //@line 64 "../../src/imu/imu_ekf.c"
-  $31 = ((($30)) + 8|0); //@line 64 "../../src/imu/imu_ekf.c"
-  $32 = $4; //@line 64 "../../src/imu/imu_ekf.c"
-  $33 = (($31) + ($32<<3)|0); //@line 64 "../../src/imu/imu_ekf.c"
-  $34 = +HEAPF64[$33>>3]; //@line 64 "../../src/imu/imu_ekf.c"
-  $35 = $2; //@line 64 "../../src/imu/imu_ekf.c"
-  $36 = ((($35)) + 704|0); //@line 64 "../../src/imu/imu_ekf.c"
-  $37 = $4; //@line 64 "../../src/imu/imu_ekf.c"
-  $38 = (($36) + ($37<<3)|0); //@line 64 "../../src/imu/imu_ekf.c"
-  HEAPF64[$38>>3] = $34; //@line 64 "../../src/imu/imu_ekf.c"
-  $39 = $4; //@line 63 "../../src/imu/imu_ekf.c"
-  $40 = (($39) + 1)|0; //@line 63 "../../src/imu/imu_ekf.c"
-  $4 = $40; //@line 63 "../../src/imu/imu_ekf.c"
- }
- $4 = 0; //@line 67 "../../src/imu/imu_ekf.c"
- while(1) {
-  $41 = $4; //@line 67 "../../src/imu/imu_ekf.c"
-  $42 = ($41|0)<(3); //@line 67 "../../src/imu/imu_ekf.c"
-  $43 = $2;
-  if (!($42)) {
-   break;
-  }
-  $44 = ((($43)) + 392|0); //@line 68 "../../src/imu/imu_ekf.c"
-  $45 = $4; //@line 68 "../../src/imu/imu_ekf.c"
-  $46 = (($44) + (($45*24)|0)|0); //@line 68 "../../src/imu/imu_ekf.c"
-  $47 = $4; //@line 68 "../../src/imu/imu_ekf.c"
-  $48 = (($46) + ($47<<3)|0); //@line 68 "../../src/imu/imu_ekf.c"
-  HEAPF64[$48>>3] = 1.0; //@line 68 "../../src/imu/imu_ekf.c"
-  $49 = $4; //@line 67 "../../src/imu/imu_ekf.c"
-  $50 = (($49) + 1)|0; //@line 67 "../../src/imu/imu_ekf.c"
-  $4 = $50; //@line 67 "../../src/imu/imu_ekf.c"
- }
- $51 = $3; //@line 72 "../../src/imu/imu_ekf.c"
- $52 = (_ekf_step($43,$51)|0); //@line 72 "../../src/imu/imu_ekf.c"
- STACKTOP = sp;return ($52|0); //@line 72 "../../src/imu/imu_ekf.c"
-}
-function _ekf_init($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0;
- var sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 96|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(96|0);
- $7 = sp;
- $3 = $0;
- $4 = $1;
- $5 = $2;
- $8 = $3; //@line 274 "../../src/tiny_ekf/tiny_ekf.c"
- $6 = $8; //@line 274 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $4; //@line 275 "../../src/tiny_ekf/tiny_ekf.c"
- $10 = $6; //@line 275 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$10>>2] = $9; //@line 275 "../../src/tiny_ekf/tiny_ekf.c"
- $11 = $6; //@line 276 "../../src/tiny_ekf/tiny_ekf.c"
- $12 = ((($11)) + 4|0); //@line 276 "../../src/tiny_ekf/tiny_ekf.c"
- $6 = $12; //@line 276 "../../src/tiny_ekf/tiny_ekf.c"
- $13 = $5; //@line 277 "../../src/tiny_ekf/tiny_ekf.c"
- $14 = $6; //@line 277 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$14>>2] = $13; //@line 277 "../../src/tiny_ekf/tiny_ekf.c"
- $15 = $3; //@line 281 "../../src/tiny_ekf/tiny_ekf.c"
- $16 = $4; //@line 281 "../../src/tiny_ekf/tiny_ekf.c"
- $17 = $5; //@line 281 "../../src/tiny_ekf/tiny_ekf.c"
- _unpack($15,$7,$16,$17); //@line 281 "../../src/tiny_ekf/tiny_ekf.c"
- $18 = ((($7)) + 4|0); //@line 284 "../../src/tiny_ekf/tiny_ekf.c"
- $19 = HEAP32[$18>>2]|0; //@line 284 "../../src/tiny_ekf/tiny_ekf.c"
- $20 = $4; //@line 284 "../../src/tiny_ekf/tiny_ekf.c"
- $21 = $4; //@line 284 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($19,$20,$21); //@line 284 "../../src/tiny_ekf/tiny_ekf.c"
- $22 = ((($7)) + 8|0); //@line 285 "../../src/tiny_ekf/tiny_ekf.c"
- $23 = HEAP32[$22>>2]|0; //@line 285 "../../src/tiny_ekf/tiny_ekf.c"
- $24 = $4; //@line 285 "../../src/tiny_ekf/tiny_ekf.c"
- $25 = $4; //@line 285 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($23,$24,$25); //@line 285 "../../src/tiny_ekf/tiny_ekf.c"
- $26 = ((($7)) + 12|0); //@line 286 "../../src/tiny_ekf/tiny_ekf.c"
- $27 = HEAP32[$26>>2]|0; //@line 286 "../../src/tiny_ekf/tiny_ekf.c"
- $28 = $5; //@line 286 "../../src/tiny_ekf/tiny_ekf.c"
- $29 = $5; //@line 286 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($27,$28,$29); //@line 286 "../../src/tiny_ekf/tiny_ekf.c"
- $30 = ((($7)) + 16|0); //@line 287 "../../src/tiny_ekf/tiny_ekf.c"
- $31 = HEAP32[$30>>2]|0; //@line 287 "../../src/tiny_ekf/tiny_ekf.c"
- $32 = $4; //@line 287 "../../src/tiny_ekf/tiny_ekf.c"
- $33 = $5; //@line 287 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($31,$32,$33); //@line 287 "../../src/tiny_ekf/tiny_ekf.c"
- $34 = ((($7)) + 20|0); //@line 288 "../../src/tiny_ekf/tiny_ekf.c"
- $35 = HEAP32[$34>>2]|0; //@line 288 "../../src/tiny_ekf/tiny_ekf.c"
- $36 = $4; //@line 288 "../../src/tiny_ekf/tiny_ekf.c"
- $37 = $4; //@line 288 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($35,$36,$37); //@line 288 "../../src/tiny_ekf/tiny_ekf.c"
- $38 = ((($7)) + 24|0); //@line 289 "../../src/tiny_ekf/tiny_ekf.c"
- $39 = HEAP32[$38>>2]|0; //@line 289 "../../src/tiny_ekf/tiny_ekf.c"
- $40 = $5; //@line 289 "../../src/tiny_ekf/tiny_ekf.c"
- $41 = $4; //@line 289 "../../src/tiny_ekf/tiny_ekf.c"
- _zeros($39,$40,$41); //@line 289 "../../src/tiny_ekf/tiny_ekf.c"
- STACKTOP = sp;return; //@line 290 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _unpack($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $100 = 0, $101 = 0, $102 = 0, $103 = 0, $104 = 0, $105 = 0, $106 = 0, $107 = 0, $108 = 0, $109 = 0, $11 = 0, $110 = 0, $111 = 0, $112 = 0, $113 = 0, $114 = 0, $115 = 0, $116 = 0, $117 = 0;
- var $118 = 0, $119 = 0, $12 = 0, $120 = 0, $121 = 0, $122 = 0, $123 = 0, $124 = 0, $125 = 0, $126 = 0, $127 = 0, $128 = 0, $129 = 0, $13 = 0, $130 = 0, $131 = 0, $132 = 0, $133 = 0, $134 = 0, $135 = 0;
- var $136 = 0, $137 = 0, $138 = 0, $139 = 0, $14 = 0, $140 = 0, $141 = 0, $142 = 0, $143 = 0, $144 = 0, $145 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0;
- var $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0;
- var $43 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0, $48 = 0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0;
- var $61 = 0, $62 = 0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0, $78 = 0, $79 = 0;
- var $8 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0, $86 = 0, $87 = 0, $88 = 0, $89 = 0, $9 = 0, $90 = 0, $91 = 0, $92 = 0, $93 = 0, $94 = 0, $95 = 0, $96 = 0, $97 = 0;
- var $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $10 = $4; //@line 230 "../../src/tiny_ekf/tiny_ekf.c"
- $8 = $10; //@line 230 "../../src/tiny_ekf/tiny_ekf.c"
- $11 = $8; //@line 231 "../../src/tiny_ekf/tiny_ekf.c"
- $12 = ((($11)) + 8|0); //@line 231 "../../src/tiny_ekf/tiny_ekf.c"
- $8 = $12; //@line 231 "../../src/tiny_ekf/tiny_ekf.c"
- $13 = $8; //@line 233 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $13; //@line 233 "../../src/tiny_ekf/tiny_ekf.c"
- $14 = $9; //@line 234 "../../src/tiny_ekf/tiny_ekf.c"
- $15 = $5; //@line 234 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$15>>2] = $14; //@line 234 "../../src/tiny_ekf/tiny_ekf.c"
- $16 = $6; //@line 235 "../../src/tiny_ekf/tiny_ekf.c"
- $17 = $9; //@line 235 "../../src/tiny_ekf/tiny_ekf.c"
- $18 = (($17) + ($16<<3)|0); //@line 235 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $18; //@line 235 "../../src/tiny_ekf/tiny_ekf.c"
- $19 = $9; //@line 236 "../../src/tiny_ekf/tiny_ekf.c"
- $20 = $5; //@line 236 "../../src/tiny_ekf/tiny_ekf.c"
- $21 = ((($20)) + 4|0); //@line 236 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$21>>2] = $19; //@line 236 "../../src/tiny_ekf/tiny_ekf.c"
- $22 = $6; //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $23 = $6; //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $24 = Math_imul($22, $23)|0; //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $25 = $9; //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $26 = (($25) + ($24<<3)|0); //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $26; //@line 237 "../../src/tiny_ekf/tiny_ekf.c"
- $27 = $9; //@line 238 "../../src/tiny_ekf/tiny_ekf.c"
- $28 = $5; //@line 238 "../../src/tiny_ekf/tiny_ekf.c"
- $29 = ((($28)) + 8|0); //@line 238 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$29>>2] = $27; //@line 238 "../../src/tiny_ekf/tiny_ekf.c"
- $30 = $6; //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $31 = $6; //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $32 = Math_imul($30, $31)|0; //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $33 = $9; //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $34 = (($33) + ($32<<3)|0); //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $34; //@line 239 "../../src/tiny_ekf/tiny_ekf.c"
- $35 = $9; //@line 240 "../../src/tiny_ekf/tiny_ekf.c"
- $36 = $5; //@line 240 "../../src/tiny_ekf/tiny_ekf.c"
- $37 = ((($36)) + 12|0); //@line 240 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$37>>2] = $35; //@line 240 "../../src/tiny_ekf/tiny_ekf.c"
- $38 = $7; //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $39 = $7; //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $40 = Math_imul($38, $39)|0; //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $41 = $9; //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $42 = (($41) + ($40<<3)|0); //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $42; //@line 241 "../../src/tiny_ekf/tiny_ekf.c"
- $43 = $9; //@line 242 "../../src/tiny_ekf/tiny_ekf.c"
- $44 = $5; //@line 242 "../../src/tiny_ekf/tiny_ekf.c"
- $45 = ((($44)) + 16|0); //@line 242 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$45>>2] = $43; //@line 242 "../../src/tiny_ekf/tiny_ekf.c"
- $46 = $6; //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $47 = $7; //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $48 = Math_imul($46, $47)|0; //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $49 = $9; //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $50 = (($49) + ($48<<3)|0); //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $50; //@line 243 "../../src/tiny_ekf/tiny_ekf.c"
- $51 = $9; //@line 244 "../../src/tiny_ekf/tiny_ekf.c"
- $52 = $5; //@line 244 "../../src/tiny_ekf/tiny_ekf.c"
- $53 = ((($52)) + 20|0); //@line 244 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$53>>2] = $51; //@line 244 "../../src/tiny_ekf/tiny_ekf.c"
- $54 = $6; //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $55 = $6; //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $56 = Math_imul($54, $55)|0; //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $57 = $9; //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $58 = (($57) + ($56<<3)|0); //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $58; //@line 245 "../../src/tiny_ekf/tiny_ekf.c"
- $59 = $9; //@line 246 "../../src/tiny_ekf/tiny_ekf.c"
- $60 = $5; //@line 246 "../../src/tiny_ekf/tiny_ekf.c"
- $61 = ((($60)) + 24|0); //@line 246 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$61>>2] = $59; //@line 246 "../../src/tiny_ekf/tiny_ekf.c"
- $62 = $7; //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $63 = $6; //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $64 = Math_imul($62, $63)|0; //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $65 = $9; //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $66 = (($65) + ($64<<3)|0); //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $66; //@line 247 "../../src/tiny_ekf/tiny_ekf.c"
- $67 = $9; //@line 248 "../../src/tiny_ekf/tiny_ekf.c"
- $68 = $5; //@line 248 "../../src/tiny_ekf/tiny_ekf.c"
- $69 = ((($68)) + 28|0); //@line 248 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$69>>2] = $67; //@line 248 "../../src/tiny_ekf/tiny_ekf.c"
- $70 = $6; //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $71 = $7; //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $72 = Math_imul($70, $71)|0; //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $73 = $9; //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $74 = (($73) + ($72<<3)|0); //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $74; //@line 249 "../../src/tiny_ekf/tiny_ekf.c"
- $75 = $9; //@line 250 "../../src/tiny_ekf/tiny_ekf.c"
- $76 = $5; //@line 250 "../../src/tiny_ekf/tiny_ekf.c"
- $77 = ((($76)) + 32|0); //@line 250 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$77>>2] = $75; //@line 250 "../../src/tiny_ekf/tiny_ekf.c"
- $78 = $6; //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $79 = $6; //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $80 = Math_imul($78, $79)|0; //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $81 = $9; //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $82 = (($81) + ($80<<3)|0); //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $82; //@line 251 "../../src/tiny_ekf/tiny_ekf.c"
- $83 = $9; //@line 252 "../../src/tiny_ekf/tiny_ekf.c"
- $84 = $5; //@line 252 "../../src/tiny_ekf/tiny_ekf.c"
- $85 = ((($84)) + 36|0); //@line 252 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$85>>2] = $83; //@line 252 "../../src/tiny_ekf/tiny_ekf.c"
- $86 = $6; //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $87 = $6; //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $88 = Math_imul($86, $87)|0; //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $89 = $9; //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $90 = (($89) + ($88<<3)|0); //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $90; //@line 253 "../../src/tiny_ekf/tiny_ekf.c"
- $91 = $9; //@line 254 "../../src/tiny_ekf/tiny_ekf.c"
- $92 = $5; //@line 254 "../../src/tiny_ekf/tiny_ekf.c"
- $93 = ((($92)) + 40|0); //@line 254 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$93>>2] = $91; //@line 254 "../../src/tiny_ekf/tiny_ekf.c"
- $94 = $6; //@line 255 "../../src/tiny_ekf/tiny_ekf.c"
- $95 = $9; //@line 255 "../../src/tiny_ekf/tiny_ekf.c"
- $96 = (($95) + ($94<<3)|0); //@line 255 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $96; //@line 255 "../../src/tiny_ekf/tiny_ekf.c"
- $97 = $9; //@line 256 "../../src/tiny_ekf/tiny_ekf.c"
- $98 = $5; //@line 256 "../../src/tiny_ekf/tiny_ekf.c"
- $99 = ((($98)) + 44|0); //@line 256 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$99>>2] = $97; //@line 256 "../../src/tiny_ekf/tiny_ekf.c"
- $100 = $7; //@line 257 "../../src/tiny_ekf/tiny_ekf.c"
- $101 = $9; //@line 257 "../../src/tiny_ekf/tiny_ekf.c"
- $102 = (($101) + ($100<<3)|0); //@line 257 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $102; //@line 257 "../../src/tiny_ekf/tiny_ekf.c"
- $103 = $9; //@line 258 "../../src/tiny_ekf/tiny_ekf.c"
- $104 = $5; //@line 258 "../../src/tiny_ekf/tiny_ekf.c"
- $105 = ((($104)) + 48|0); //@line 258 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$105>>2] = $103; //@line 258 "../../src/tiny_ekf/tiny_ekf.c"
- $106 = $6; //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $107 = $6; //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $108 = Math_imul($106, $107)|0; //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $109 = $9; //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $110 = (($109) + ($108<<3)|0); //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $110; //@line 259 "../../src/tiny_ekf/tiny_ekf.c"
- $111 = $9; //@line 260 "../../src/tiny_ekf/tiny_ekf.c"
- $112 = $5; //@line 260 "../../src/tiny_ekf/tiny_ekf.c"
- $113 = ((($112)) + 52|0); //@line 260 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$113>>2] = $111; //@line 260 "../../src/tiny_ekf/tiny_ekf.c"
- $114 = $6; //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $115 = $7; //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $116 = Math_imul($114, $115)|0; //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $117 = $9; //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $118 = (($117) + ($116<<3)|0); //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $118; //@line 261 "../../src/tiny_ekf/tiny_ekf.c"
- $119 = $9; //@line 262 "../../src/tiny_ekf/tiny_ekf.c"
- $120 = $5; //@line 262 "../../src/tiny_ekf/tiny_ekf.c"
- $121 = ((($120)) + 56|0); //@line 262 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$121>>2] = $119; //@line 262 "../../src/tiny_ekf/tiny_ekf.c"
- $122 = $7; //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $123 = $6; //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $124 = Math_imul($122, $123)|0; //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $125 = $9; //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $126 = (($125) + ($124<<3)|0); //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $126; //@line 263 "../../src/tiny_ekf/tiny_ekf.c"
- $127 = $9; //@line 264 "../../src/tiny_ekf/tiny_ekf.c"
- $128 = $5; //@line 264 "../../src/tiny_ekf/tiny_ekf.c"
- $129 = ((($128)) + 60|0); //@line 264 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$129>>2] = $127; //@line 264 "../../src/tiny_ekf/tiny_ekf.c"
- $130 = $7; //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $131 = $7; //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $132 = Math_imul($130, $131)|0; //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $133 = $9; //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $134 = (($133) + ($132<<3)|0); //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $134; //@line 265 "../../src/tiny_ekf/tiny_ekf.c"
- $135 = $9; //@line 266 "../../src/tiny_ekf/tiny_ekf.c"
- $136 = $5; //@line 266 "../../src/tiny_ekf/tiny_ekf.c"
- $137 = ((($136)) + 64|0); //@line 266 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$137>>2] = $135; //@line 266 "../../src/tiny_ekf/tiny_ekf.c"
- $138 = $7; //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $139 = $7; //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $140 = Math_imul($138, $139)|0; //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $141 = $9; //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $142 = (($141) + ($140<<3)|0); //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $9 = $142; //@line 267 "../../src/tiny_ekf/tiny_ekf.c"
- $143 = $9; //@line 268 "../../src/tiny_ekf/tiny_ekf.c"
- $144 = $5; //@line 268 "../../src/tiny_ekf/tiny_ekf.c"
- $145 = ((($144)) + 68|0); //@line 268 "../../src/tiny_ekf/tiny_ekf.c"
- HEAP32[$145>>2] = $143; //@line 268 "../../src/tiny_ekf/tiny_ekf.c"
- STACKTOP = sp;return; //@line 269 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _zeros($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $3 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $3 = $0;
- $4 = $1;
- $5 = $2;
- $6 = 0; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $7 = $6; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $4; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $5; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = Math_imul($8, $9)|0; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = ($7|0)<($10|0); //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($11)) {
-   break;
-  }
-  $12 = $3; //@line 96 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = $6; //@line 96 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = (($12) + ($13<<3)|0); //@line 96 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$14>>3] = 0.0; //@line 96 "../../src/tiny_ekf/tiny_ekf.c"
-  $15 = $6; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = (($15) + 1)|0; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
-  $6 = $16; //@line 95 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 97 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _ekf_step($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $10 = 0, $100 = 0, $101 = 0, $102 = 0, $103 = 0, $104 = 0, $105 = 0, $106 = 0, $107 = 0, $108 = 0, $109 = 0, $11 = 0, $110 = 0, $111 = 0, $112 = 0, $113 = 0, $114 = 0, $115 = 0, $116 = 0, $117 = 0;
- var $118 = 0, $119 = 0, $12 = 0, $120 = 0, $121 = 0, $122 = 0, $123 = 0, $124 = 0, $125 = 0, $126 = 0, $127 = 0, $128 = 0, $129 = 0, $13 = 0, $130 = 0, $131 = 0, $132 = 0, $133 = 0, $134 = 0, $135 = 0;
- var $136 = 0, $137 = 0, $138 = 0, $139 = 0, $14 = 0, $140 = 0, $141 = 0, $142 = 0, $143 = 0, $144 = 0, $145 = 0, $146 = 0, $147 = 0, $148 = 0, $149 = 0, $15 = 0, $150 = 0, $151 = 0, $16 = 0, $17 = 0;
- var $18 = 0, $19 = 0, $2 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0, $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0;
- var $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0, $48 = 0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0;
- var $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0;
- var $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0, $78 = 0, $79 = 0, $8 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0, $86 = 0, $87 = 0, $88 = 0, $89 = 0, $9 = 0;
- var $90 = 0, $91 = 0, $92 = 0, $93 = 0, $94 = 0, $95 = 0, $96 = 0, $97 = 0, $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 96|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(96|0);
- $8 = sp;
- $3 = $0;
- $4 = $1;
- $9 = $3; //@line 296 "../../src/tiny_ekf/tiny_ekf.c"
- $5 = $9; //@line 296 "../../src/tiny_ekf/tiny_ekf.c"
- $10 = $5; //@line 297 "../../src/tiny_ekf/tiny_ekf.c"
- $11 = HEAP32[$10>>2]|0; //@line 297 "../../src/tiny_ekf/tiny_ekf.c"
- $6 = $11; //@line 297 "../../src/tiny_ekf/tiny_ekf.c"
- $12 = $5; //@line 298 "../../src/tiny_ekf/tiny_ekf.c"
- $13 = ((($12)) + 4|0); //@line 298 "../../src/tiny_ekf/tiny_ekf.c"
- $5 = $13; //@line 298 "../../src/tiny_ekf/tiny_ekf.c"
- $14 = $5; //@line 299 "../../src/tiny_ekf/tiny_ekf.c"
- $15 = HEAP32[$14>>2]|0; //@line 299 "../../src/tiny_ekf/tiny_ekf.c"
- $7 = $15; //@line 299 "../../src/tiny_ekf/tiny_ekf.c"
- $16 = $3; //@line 302 "../../src/tiny_ekf/tiny_ekf.c"
- $17 = $6; //@line 302 "../../src/tiny_ekf/tiny_ekf.c"
- $18 = $7; //@line 302 "../../src/tiny_ekf/tiny_ekf.c"
- _unpack($16,$8,$17,$18); //@line 302 "../../src/tiny_ekf/tiny_ekf.c"
- $19 = ((($8)) + 20|0); //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $20 = HEAP32[$19>>2]|0; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $21 = ((($8)) + 4|0); //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $22 = HEAP32[$21>>2]|0; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $23 = ((($8)) + 48|0); //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $24 = HEAP32[$23>>2]|0; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $25 = $6; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $26 = $6; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $27 = $6; //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- _mulmat($20,$22,$24,$25,$26,$27); //@line 305 "../../src/tiny_ekf/tiny_ekf.c"
- $28 = ((($8)) + 20|0); //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $29 = HEAP32[$28>>2]|0; //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $30 = ((($8)) + 32|0); //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $31 = HEAP32[$30>>2]|0; //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $32 = $6; //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $33 = $6; //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- _transpose($29,$31,$32,$33); //@line 306 "../../src/tiny_ekf/tiny_ekf.c"
- $34 = ((($8)) + 48|0); //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $35 = HEAP32[$34>>2]|0; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $36 = ((($8)) + 32|0); //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $37 = HEAP32[$36>>2]|0; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $38 = ((($8)) + 36|0); //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $39 = HEAP32[$38>>2]|0; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $40 = $6; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $41 = $6; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $42 = $6; //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- _mulmat($35,$37,$39,$40,$41,$42); //@line 307 "../../src/tiny_ekf/tiny_ekf.c"
- $43 = ((($8)) + 36|0); //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $44 = HEAP32[$43>>2]|0; //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $45 = ((($8)) + 8|0); //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $46 = HEAP32[$45>>2]|0; //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $47 = $6; //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $48 = $6; //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- _accum($44,$46,$47,$48); //@line 308 "../../src/tiny_ekf/tiny_ekf.c"
- $49 = ((($8)) + 24|0); //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $50 = HEAP32[$49>>2]|0; //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $51 = ((($8)) + 28|0); //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $52 = HEAP32[$51>>2]|0; //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $53 = $7; //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $54 = $6; //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- _transpose($50,$52,$53,$54); //@line 311 "../../src/tiny_ekf/tiny_ekf.c"
- $55 = ((($8)) + 36|0); //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $56 = HEAP32[$55>>2]|0; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $57 = ((($8)) + 28|0); //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $58 = HEAP32[$57>>2]|0; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $59 = ((($8)) + 52|0); //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $60 = HEAP32[$59>>2]|0; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $61 = $6; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $62 = $6; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $63 = $7; //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- _mulmat($56,$58,$60,$61,$62,$63); //@line 312 "../../src/tiny_ekf/tiny_ekf.c"
- $64 = ((($8)) + 24|0); //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $65 = HEAP32[$64>>2]|0; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $66 = ((($8)) + 36|0); //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $67 = HEAP32[$66>>2]|0; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $68 = ((($8)) + 56|0); //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $69 = HEAP32[$68>>2]|0; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $70 = $7; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $71 = $6; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $72 = $6; //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- _mulmat($65,$67,$69,$70,$71,$72); //@line 313 "../../src/tiny_ekf/tiny_ekf.c"
- $73 = ((($8)) + 56|0); //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $74 = HEAP32[$73>>2]|0; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $75 = ((($8)) + 28|0); //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $76 = HEAP32[$75>>2]|0; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $77 = ((($8)) + 60|0); //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $78 = HEAP32[$77>>2]|0; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $79 = $7; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $80 = $6; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $81 = $7; //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- _mulmat($74,$76,$78,$79,$80,$81); //@line 314 "../../src/tiny_ekf/tiny_ekf.c"
- $82 = ((($8)) + 60|0); //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $83 = HEAP32[$82>>2]|0; //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $84 = ((($8)) + 12|0); //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $85 = HEAP32[$84>>2]|0; //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $86 = $7; //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $87 = $7; //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- _accum($83,$85,$86,$87); //@line 315 "../../src/tiny_ekf/tiny_ekf.c"
- $88 = ((($8)) + 60|0); //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $89 = HEAP32[$88>>2]|0; //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $90 = ((($8)) + 64|0); //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $91 = HEAP32[$90>>2]|0; //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $92 = ((($8)) + 68|0); //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $93 = HEAP32[$92>>2]|0; //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $94 = $7; //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $95 = (_cholsl($89,$91,$93,$94)|0); //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- $96 = ($95|0)!=(0); //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
- if ($96) {
-  $2 = 1; //@line 316 "../../src/tiny_ekf/tiny_ekf.c"
-  $151 = $2; //@line 332 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($151|0); //@line 332 "../../src/tiny_ekf/tiny_ekf.c"
- } else {
-  $97 = ((($8)) + 52|0); //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $98 = HEAP32[$97>>2]|0; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $99 = ((($8)) + 64|0); //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $100 = HEAP32[$99>>2]|0; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $101 = ((($8)) + 16|0); //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $102 = HEAP32[$101>>2]|0; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $103 = $6; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $104 = $7; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $105 = $7; //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  _mulmat($98,$100,$102,$103,$104,$105); //@line 317 "../../src/tiny_ekf/tiny_ekf.c"
-  $106 = $4; //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $107 = ((($8)) + 44|0); //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $108 = HEAP32[$107>>2]|0; //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $109 = ((($8)) + 68|0); //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $110 = HEAP32[$109>>2]|0; //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $111 = $7; //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  _sub($106,$108,$110,$111); //@line 320 "../../src/tiny_ekf/tiny_ekf.c"
-  $112 = ((($8)) + 16|0); //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $113 = HEAP32[$112>>2]|0; //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $114 = ((($8)) + 68|0); //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $115 = HEAP32[$114>>2]|0; //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $116 = ((($8)) + 56|0); //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $117 = HEAP32[$116>>2]|0; //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $118 = $6; //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $119 = $7; //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  _mulvec($113,$115,$117,$118,$119); //@line 321 "../../src/tiny_ekf/tiny_ekf.c"
-  $120 = ((($8)) + 40|0); //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $121 = HEAP32[$120>>2]|0; //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $122 = ((($8)) + 56|0); //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $123 = HEAP32[$122>>2]|0; //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $124 = HEAP32[$8>>2]|0; //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $125 = $6; //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  _add($121,$123,$124,$125); //@line 322 "../../src/tiny_ekf/tiny_ekf.c"
-  $126 = ((($8)) + 16|0); //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $127 = HEAP32[$126>>2]|0; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $128 = ((($8)) + 24|0); //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $129 = HEAP32[$128>>2]|0; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $130 = ((($8)) + 48|0); //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $131 = HEAP32[$130>>2]|0; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $132 = $6; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $133 = $7; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $134 = $6; //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  _mulmat($127,$129,$131,$132,$133,$134); //@line 325 "../../src/tiny_ekf/tiny_ekf.c"
-  $135 = ((($8)) + 48|0); //@line 326 "../../src/tiny_ekf/tiny_ekf.c"
-  $136 = HEAP32[$135>>2]|0; //@line 326 "../../src/tiny_ekf/tiny_ekf.c"
-  $137 = $6; //@line 326 "../../src/tiny_ekf/tiny_ekf.c"
-  $138 = $6; //@line 326 "../../src/tiny_ekf/tiny_ekf.c"
-  _negate($136,$137,$138); //@line 326 "../../src/tiny_ekf/tiny_ekf.c"
-  $139 = ((($8)) + 48|0); //@line 327 "../../src/tiny_ekf/tiny_ekf.c"
-  $140 = HEAP32[$139>>2]|0; //@line 327 "../../src/tiny_ekf/tiny_ekf.c"
-  $141 = $6; //@line 327 "../../src/tiny_ekf/tiny_ekf.c"
-  _mat_addeye($140,$141); //@line 327 "../../src/tiny_ekf/tiny_ekf.c"
-  $142 = ((($8)) + 48|0); //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $143 = HEAP32[$142>>2]|0; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $144 = ((($8)) + 36|0); //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $145 = HEAP32[$144>>2]|0; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $146 = ((($8)) + 4|0); //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $147 = HEAP32[$146>>2]|0; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $148 = $6; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $149 = $6; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $150 = $6; //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  _mulmat($143,$145,$147,$148,$149,$150); //@line 328 "../../src/tiny_ekf/tiny_ekf.c"
-  $2 = 0; //@line 331 "../../src/tiny_ekf/tiny_ekf.c"
-  $151 = $2; //@line 332 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($151|0); //@line 332 "../../src/tiny_ekf/tiny_ekf.c"
- }
- return (0)|0;
-}
-function _mulmat($0,$1,$2,$3,$4,$5) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- $4 = $4|0;
- $5 = $5|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0.0, $39 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0.0, $47 = 0.0, $48 = 0, $49 = 0;
- var $50 = 0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0.0, $56 = 0.0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0, $62 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $6 = $0;
- $7 = $1;
- $8 = $2;
- $9 = $3;
- $10 = $4;
- $11 = $5;
- $12 = 0; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $15 = $12; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = $9; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
-  $17 = ($15|0)<($16|0); //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($17)) {
-   break;
-  }
-  $13 = 0; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $18 = $13; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = $11; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = ($18|0)<($19|0); //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($20)) {
-    break;
-   }
-   $21 = $8; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = $12; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = $11; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = Math_imul($22, $23)|0; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = $13; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = (($24) + ($25))|0; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = (($21) + ($26<<3)|0); //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$27>>3] = 0.0; //@line 121 "../../src/tiny_ekf/tiny_ekf.c"
-   $14 = 0; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-   while(1) {
-    $28 = $14; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-    $29 = $10; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-    $30 = ($28|0)<($29|0); //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-    if (!($30)) {
-     break;
-    }
-    $31 = $6; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $32 = $12; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $33 = $10; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $34 = Math_imul($32, $33)|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $35 = $14; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $36 = (($34) + ($35))|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $37 = (($31) + ($36<<3)|0); //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $38 = +HEAPF64[$37>>3]; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $39 = $7; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $40 = $14; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $41 = $11; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $42 = Math_imul($40, $41)|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $43 = $13; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $44 = (($42) + ($43))|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $45 = (($39) + ($44<<3)|0); //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $46 = +HEAPF64[$45>>3]; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $47 = $38 * $46; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $48 = $8; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $49 = $12; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $50 = $11; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $51 = Math_imul($49, $50)|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $52 = $13; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $53 = (($51) + ($52))|0; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $54 = (($48) + ($53<<3)|0); //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $55 = +HEAPF64[$54>>3]; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $56 = $55 + $47; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    HEAPF64[$54>>3] = $56; //@line 123 "../../src/tiny_ekf/tiny_ekf.c"
-    $57 = $14; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-    $58 = (($57) + 1)|0; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-    $14 = $58; //@line 122 "../../src/tiny_ekf/tiny_ekf.c"
-   }
-   $59 = $13; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-   $60 = (($59) + 1)|0; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-   $13 = $60; //@line 120 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $61 = $12; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
-  $62 = (($61) + 1)|0; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
-  $12 = $62; //@line 119 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 125 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _transpose($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0.0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $8 = 0; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $10 = $8; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = $6; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
-  $12 = ($10|0)<($11|0); //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($12)) {
-   break;
-  }
-  $9 = 0; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $13 = $9; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-   $14 = $7; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-   $15 = ($13|0)<($14|0); //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($15)) {
-    break;
-   }
-   $16 = $4; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $17 = $8; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $18 = $7; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = Math_imul($17, $18)|0; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = $9; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $21 = (($19) + ($20))|0; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = (($16) + ($21<<3)|0); //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = +HEAPF64[$22>>3]; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = $5; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = $9; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = $6; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = Math_imul($25, $26)|0; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = $8; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = (($27) + ($28))|0; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = (($24) + ($29<<3)|0); //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$30>>3] = $23; //@line 144 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = $9; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-   $32 = (($31) + 1)|0; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-   $9 = $32; //@line 143 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $33 = $8; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
-  $34 = (($33) + 1)|0; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $34; //@line 142 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 146 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _accum($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0.0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0, $31 = 0.0, $32 = 0.0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $8 = 0; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $10 = $8; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = $6; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
-  $12 = ($10|0)<($11|0); //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($12)) {
-   break;
-  }
-  $9 = 0; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $13 = $9; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-   $14 = $7; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-   $15 = ($13|0)<($14|0); //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($15)) {
-    break;
-   }
-   $16 = $5; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $17 = $8; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $18 = $7; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = Math_imul($17, $18)|0; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = $9; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $21 = (($19) + ($20))|0; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = (($16) + ($21<<3)|0); //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = +HEAPF64[$22>>3]; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = $4; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = $8; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = $7; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = Math_imul($25, $26)|0; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = $9; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = (($27) + ($28))|0; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = (($24) + ($29<<3)|0); //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = +HEAPF64[$30>>3]; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $32 = $31 + $23; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$30>>3] = $32; //@line 155 "../../src/tiny_ekf/tiny_ekf.c"
-   $33 = $9; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-   $34 = (($33) + 1)|0; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-   $9 = $34; //@line 154 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $35 = $8; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
-  $36 = (($35) + 1)|0; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $36; //@line 153 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 156 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _cholsl($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $100 = 0, $101 = 0, $102 = 0, $103 = 0, $104 = 0, $105 = 0, $106 = 0.0, $107 = 0, $108 = 0, $109 = 0, $11 = 0, $110 = 0, $111 = 0, $112 = 0, $113 = 0, $114 = 0.0, $115 = 0.0, $116 = 0, $117 = 0;
- var $118 = 0, $119 = 0, $12 = 0, $120 = 0, $121 = 0, $122 = 0, $123 = 0.0, $124 = 0.0, $125 = 0, $126 = 0, $127 = 0, $128 = 0, $129 = 0, $13 = 0, $130 = 0, $131 = 0, $132 = 0, $133 = 0, $134 = 0, $135 = 0;
- var $136 = 0, $137 = 0, $138 = 0, $139 = 0, $14 = 0, $140 = 0, $141 = 0, $142 = 0, $143 = 0, $144 = 0.0, $145 = 0, $146 = 0, $147 = 0, $148 = 0, $149 = 0, $15 = 0, $150 = 0, $151 = 0, $152 = 0, $153 = 0;
- var $154 = 0, $155 = 0, $156 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0, $30 = 0, $31 = 0, $32 = 0;
- var $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0.0, $48 = 0, $49 = 0, $5 = 0, $50 = 0;
- var $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0.0, $56 = 0.0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0.0;
- var $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0.0, $78 = 0.0, $79 = 0, $8 = 0, $80 = 0, $81 = 0, $82 = 0, $83 = 0, $84 = 0, $85 = 0, $86 = 0.0, $87 = 0.0;
- var $88 = 0, $89 = 0, $9 = 0, $90 = 0, $91 = 0, $92 = 0, $93 = 0, $94 = 0, $95 = 0, $96 = 0, $97 = 0, $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $5 = $0;
- $6 = $1;
- $7 = $2;
- $8 = $3;
- $12 = $5; //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- $13 = $6; //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- $14 = $7; //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- $15 = $8; //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- $16 = (_choldcsl($12,$13,$14,$15)|0); //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- $17 = ($16|0)!=(0); //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
- if ($17) {
-  $4 = 1; //@line 66 "../../src/tiny_ekf/tiny_ekf.c"
-  $156 = $4; //@line 90 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($156|0); //@line 90 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $9 = 0; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $18 = $9; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
-  $19 = $8; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
-  $20 = ($18|0)<($19|0); //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($20)) {
-   break;
-  }
-  $21 = $9; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-  $22 = (($21) + 1)|0; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $22; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $23 = $10; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = $8; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = ($23|0)<($24|0); //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($25)) {
-    break;
-   }
-   $26 = $6; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = $9; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = $8; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = Math_imul($27, $28)|0; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = $10; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = (($29) + ($30))|0; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $32 = (($26) + ($31<<3)|0); //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$32>>3] = 0.0; //@line 69 "../../src/tiny_ekf/tiny_ekf.c"
-   $33 = $10; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-   $34 = (($33) + 1)|0; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $34; //@line 68 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $35 = $9; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
-  $36 = (($35) + 1)|0; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $36; //@line 67 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $9 = 0; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $37 = $9; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
-  $38 = $8; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
-  $39 = ($37|0)<($38|0); //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($39)) {
-   break;
-  }
-  $40 = $6; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $41 = $9; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $42 = $8; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $43 = Math_imul($41, $42)|0; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $44 = $9; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $45 = (($43) + ($44))|0; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $46 = (($40) + ($45<<3)|0); //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $47 = +HEAPF64[$46>>3]; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $48 = $6; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $49 = $9; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $50 = $8; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $51 = Math_imul($49, $50)|0; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $52 = $9; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $53 = (($51) + ($52))|0; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $54 = (($48) + ($53<<3)|0); //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $55 = +HEAPF64[$54>>3]; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $56 = $55 * $47; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$54>>3] = $56; //@line 73 "../../src/tiny_ekf/tiny_ekf.c"
-  $57 = $9; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-  $58 = (($57) + 1)|0; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = $58; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $59 = $11; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-   $60 = $8; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-   $61 = ($59|0)<($60|0); //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($61)) {
-    break;
-   }
-   $62 = $6; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $63 = $11; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $64 = $8; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $65 = Math_imul($63, $64)|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $66 = $9; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $67 = (($65) + ($66))|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $68 = (($62) + ($67<<3)|0); //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $69 = +HEAPF64[$68>>3]; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $70 = $6; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $71 = $11; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $72 = $8; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $73 = Math_imul($71, $72)|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $74 = $9; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $75 = (($73) + ($74))|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $76 = (($70) + ($75<<3)|0); //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $77 = +HEAPF64[$76>>3]; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $78 = $69 * $77; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $79 = $6; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $80 = $9; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $81 = $8; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $82 = Math_imul($80, $81)|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $83 = $9; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $84 = (($82) + ($83))|0; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $85 = (($79) + ($84<<3)|0); //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $86 = +HEAPF64[$85>>3]; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $87 = $86 + $78; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$85>>3] = $87; //@line 75 "../../src/tiny_ekf/tiny_ekf.c"
-   $88 = $11; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-   $89 = (($88) + 1)|0; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-   $11 = $89; //@line 74 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $90 = $9; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-  $91 = (($90) + 1)|0; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $91; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $92 = $10; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-   $93 = $8; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-   $94 = ($92|0)<($93|0); //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($94)) {
-    break;
-   }
-   $95 = $10; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-   $11 = $95; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-   while(1) {
-    $96 = $11; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-    $97 = $8; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-    $98 = ($96|0)<($97|0); //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-    if (!($98)) {
-     break;
-    }
-    $99 = $6; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $100 = $11; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $101 = $8; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $102 = Math_imul($100, $101)|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $103 = $9; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $104 = (($102) + ($103))|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $105 = (($99) + ($104<<3)|0); //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $106 = +HEAPF64[$105>>3]; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $107 = $6; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $108 = $11; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $109 = $8; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $110 = Math_imul($108, $109)|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $111 = $10; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $112 = (($110) + ($111))|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $113 = (($107) + ($112<<3)|0); //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $114 = +HEAPF64[$113>>3]; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $115 = $106 * $114; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $116 = $6; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $117 = $9; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $118 = $8; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $119 = Math_imul($117, $118)|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $120 = $10; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $121 = (($119) + ($120))|0; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $122 = (($116) + ($121<<3)|0); //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $123 = +HEAPF64[$122>>3]; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $124 = $123 + $115; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    HEAPF64[$122>>3] = $124; //@line 79 "../../src/tiny_ekf/tiny_ekf.c"
-    $125 = $11; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-    $126 = (($125) + 1)|0; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-    $11 = $126; //@line 78 "../../src/tiny_ekf/tiny_ekf.c"
-   }
-   $127 = $10; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-   $128 = (($127) + 1)|0; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $128; //@line 77 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $129 = $9; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
-  $130 = (($129) + 1)|0; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $130; //@line 72 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $9 = 0; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $131 = $9; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
-  $132 = $8; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
-  $133 = ($131|0)<($132|0); //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($133)) {
-   break;
-  }
-  $10 = 0; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $134 = $10; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-   $135 = $9; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-   $136 = ($134|0)<($135|0); //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($136)) {
-    break;
-   }
-   $137 = $6; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $138 = $10; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $139 = $8; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $140 = Math_imul($138, $139)|0; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $141 = $9; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $142 = (($140) + ($141))|0; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $143 = (($137) + ($142<<3)|0); //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $144 = +HEAPF64[$143>>3]; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $145 = $6; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $146 = $9; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $147 = $8; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $148 = Math_imul($146, $147)|0; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $149 = $10; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $150 = (($148) + ($149))|0; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $151 = (($145) + ($150<<3)|0); //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$151>>3] = $144; //@line 85 "../../src/tiny_ekf/tiny_ekf.c"
-   $152 = $10; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-   $153 = (($152) + 1)|0; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $153; //@line 84 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $154 = $9; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
-  $155 = (($154) + 1)|0; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $155; //@line 83 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $4 = 0; //@line 89 "../../src/tiny_ekf/tiny_ekf.c"
- $156 = $4; //@line 90 "../../src/tiny_ekf/tiny_ekf.c"
- STACKTOP = sp;return ($156|0); //@line 90 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _sub($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0, $17 = 0, $18 = 0, $19 = 0.0, $20 = 0.0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0;
- var $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $8 = 0; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $9 = $8; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $7; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = ($9|0)<($10|0); //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($11)) {
-   break;
-  }
-  $12 = $4; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = $8; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = (($12) + ($13<<3)|0); //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $15 = +HEAPF64[$14>>3]; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = $5; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $17 = $8; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $18 = (($16) + ($17<<3)|0); //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $19 = +HEAPF64[$18>>3]; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $20 = $15 - $19; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $21 = $6; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $22 = $8; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $23 = (($21) + ($22<<3)|0); //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$23>>3] = $20; //@line 174 "../../src/tiny_ekf/tiny_ekf.c"
-  $24 = $8; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
-  $25 = (($24) + 1)|0; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $25; //@line 173 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 175 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _mulvec($0,$1,$2,$3,$4) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- $4 = $4|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0.0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $30 = 0, $31 = 0, $32 = 0.0, $33 = 0.0, $34 = 0, $35 = 0, $36 = 0, $37 = 0.0, $38 = 0.0, $39 = 0, $40 = 0, $41 = 0, $42 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $5 = $0;
- $6 = $1;
- $7 = $2;
- $8 = $3;
- $9 = $4;
- $10 = 0; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $12 = $10; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = $8; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = ($12|0)<($13|0); //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($14)) {
-   break;
-  }
-  $15 = $7; //@line 132 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = $10; //@line 132 "../../src/tiny_ekf/tiny_ekf.c"
-  $17 = (($15) + ($16<<3)|0); //@line 132 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$17>>3] = 0.0; //@line 132 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = 0; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $18 = $11; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = $9; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = ($18|0)<($19|0); //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($20)) {
-    break;
-   }
-   $21 = $6; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = $11; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = (($21) + ($22<<3)|0); //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = +HEAPF64[$23>>3]; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = $5; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = $10; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = $9; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = Math_imul($26, $27)|0; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = $11; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = (($28) + ($29))|0; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = (($25) + ($30<<3)|0); //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $32 = +HEAPF64[$31>>3]; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $33 = $24 * $32; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $34 = $7; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $35 = $10; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $36 = (($34) + ($35<<3)|0); //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $37 = +HEAPF64[$36>>3]; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $38 = $37 + $33; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$36>>3] = $38; //@line 134 "../../src/tiny_ekf/tiny_ekf.c"
-   $39 = $11; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-   $40 = (($39) + 1)|0; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-   $11 = $40; //@line 133 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $41 = $10; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
-  $42 = (($41) + 1)|0; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $42; //@line 131 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 136 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _add($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0, $17 = 0, $18 = 0, $19 = 0.0, $20 = 0.0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0;
- var $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = $3;
- $8 = 0; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $9 = $8; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $7; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = ($9|0)<($10|0); //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($11)) {
-   break;
-  }
-  $12 = $4; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = $8; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = (($12) + ($13<<3)|0); //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $15 = +HEAPF64[$14>>3]; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = $5; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $17 = $8; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $18 = (($16) + ($17<<3)|0); //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $19 = +HEAPF64[$18>>3]; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $20 = $15 + $19; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $21 = $6; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $22 = $8; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $23 = (($21) + ($22<<3)|0); //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$23>>3] = $20; //@line 164 "../../src/tiny_ekf/tiny_ekf.c"
-  $24 = $8; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
-  $25 = (($24) + 1)|0; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $25; //@line 163 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 165 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _negate($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0.0, $22 = 0.0, $23 = 0, $24 = 0, $25 = 0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 32|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(32|0);
- $3 = $0;
- $4 = $1;
- $5 = $2;
- $6 = 0; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $8 = $6; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $4; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = ($8|0)<($9|0); //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($10)) {
-   break;
-  }
-  $7 = 0; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $11 = $7; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-   $12 = $5; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-   $13 = ($11|0)<($12|0); //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($13)) {
-    break;
-   }
-   $14 = $3; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $15 = $6; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $16 = $5; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $17 = Math_imul($15, $16)|0; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $18 = $7; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = (($17) + ($18))|0; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = (($14) + ($19<<3)|0); //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $21 = +HEAPF64[$20>>3]; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = - $21; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = $3; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = $6; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = $5; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = Math_imul($24, $25)|0; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = $7; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = (($26) + ($27))|0; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = (($23) + ($28<<3)|0); //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$29>>3] = $22; //@line 183 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = $7; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = (($30) + 1)|0; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-   $7 = $31; //@line 182 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $32 = $6; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
-  $33 = (($32) + 1)|0; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
-  $6 = $33; //@line 181 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 184 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _mat_addeye($0,$1) {
- $0 = $0|0;
- $1 = $1|0;
- var $10 = 0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0.0, $16 = 0.0, $17 = 0, $18 = 0, $2 = 0, $3 = 0, $4 = 0, $5 = 0, $6 = 0, $7 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
- $2 = $0;
- $3 = $1;
- $4 = 0; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $5 = $4; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
-  $6 = $3; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
-  $7 = ($5|0)<($6|0); //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($7)) {
-   break;
-  }
-  $8 = $2; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $4; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $3; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $11 = Math_imul($9, $10)|0; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $12 = $4; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = (($11) + ($12))|0; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = (($8) + ($13<<3)|0); //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $15 = +HEAPF64[$14>>3]; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $16 = $15 + 1.0; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$14>>3] = $16; //@line 190 "../../src/tiny_ekf/tiny_ekf.c"
-  $17 = $4; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
-  $18 = (($17) + 1)|0; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
-  $4 = $18; //@line 189 "../../src/tiny_ekf/tiny_ekf.c"
- }
- STACKTOP = sp;return; //@line 191 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _choldcsl($0,$1,$2,$3) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- $3 = $3|0;
- var $10 = 0, $100 = 0, $101 = 0, $102 = 0, $103 = 0, $104 = 0, $105 = 0, $11 = 0, $12 = 0.0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0;
- var $24 = 0, $25 = 0, $26 = 0.0, $27 = 0, $28 = 0, $29 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0;
- var $43 = 0, $44 = 0, $45 = 0, $46 = 0, $47 = 0, $48 = 0, $49 = 0.0, $5 = 0, $50 = 0.0, $51 = 0, $52 = 0, $53 = 0, $54 = 0, $55 = 0, $56 = 0, $57 = 0, $58 = 0, $59 = 0, $6 = 0, $60 = 0;
- var $61 = 0, $62 = 0, $63 = 0, $64 = 0, $65 = 0, $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0, $74 = 0.0, $75 = 0, $76 = 0, $77 = 0, $78 = 0, $79 = 0;
- var $8 = 0, $80 = 0, $81 = 0, $82 = 0.0, $83 = 0.0, $84 = 0.0, $85 = 0.0, $86 = 0, $87 = 0, $88 = 0.0, $89 = 0, $9 = 0, $90 = 0, $91 = 0, $92 = 0.0, $93 = 0.0, $94 = 0, $95 = 0, $96 = 0, $97 = 0;
- var $98 = 0, $99 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $5 = $0;
- $6 = $1;
- $7 = $2;
- $8 = $3;
- $9 = 0; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $13 = $9; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
-  $14 = $8; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
-  $15 = ($13|0)<($14|0); //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($15)) {
-   break;
-  }
-  $10 = 0; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $16 = $10; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-   $17 = $8; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-   $18 = ($16|0)<($17|0); //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($18)) {
-    break;
-   }
-   $19 = $5; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = $9; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $21 = $8; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = Math_imul($20, $21)|0; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = $10; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = (($22) + ($23))|0; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = (($19) + ($24<<3)|0); //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = +HEAPF64[$25>>3]; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = $6; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $28 = $9; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $29 = $8; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $30 = Math_imul($28, $29)|0; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $31 = $10; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $32 = (($30) + ($31))|0; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $33 = (($27) + ($32<<3)|0); //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$33>>3] = $26; //@line 46 "../../src/tiny_ekf/tiny_ekf.c"
-   $34 = $10; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-   $35 = (($34) + 1)|0; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $35; //@line 45 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $36 = $9; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
-  $37 = (($36) + 1)|0; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $37; //@line 44 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $38 = $6; //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
- $39 = $7; //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
- $40 = $8; //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
- $41 = (_choldc1($38,$39,$40)|0); //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
- $42 = ($41|0)!=(0); //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
- if ($42) {
-  $4 = 1; //@line 47 "../../src/tiny_ekf/tiny_ekf.c"
-  $105 = $4; //@line 60 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($105|0); //@line 60 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $9 = 0; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
- while(1) {
-  $43 = $9; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
-  $44 = $8; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
-  $45 = ($43|0)<($44|0); //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($45)) {
-   break;
-  }
-  $46 = $7; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $47 = $9; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $48 = (($46) + ($47<<3)|0); //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $49 = +HEAPF64[$48>>3]; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $50 = 1.0 / $49; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $51 = $6; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $52 = $9; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $53 = $8; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $54 = Math_imul($52, $53)|0; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $55 = $9; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $56 = (($54) + ($55))|0; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $57 = (($51) + ($56<<3)|0); //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  HEAPF64[$57>>3] = $50; //@line 49 "../../src/tiny_ekf/tiny_ekf.c"
-  $58 = $9; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-  $59 = (($58) + 1)|0; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-  $10 = $59; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $60 = $10; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-   $61 = $8; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-   $62 = ($60|0)<($61|0); //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($62)) {
-    break;
-   }
-   $12 = 0.0; //@line 51 "../../src/tiny_ekf/tiny_ekf.c"
-   $63 = $9; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-   $11 = $63; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-   while(1) {
-    $64 = $11; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-    $65 = $10; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-    $66 = ($64|0)<($65|0); //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-    if (!($66)) {
-     break;
-    }
-    $67 = $6; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $68 = $10; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $69 = $8; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $70 = Math_imul($68, $69)|0; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $71 = $11; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $72 = (($70) + ($71))|0; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $73 = (($67) + ($72<<3)|0); //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $74 = +HEAPF64[$73>>3]; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $75 = $6; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $76 = $11; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $77 = $8; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $78 = Math_imul($76, $77)|0; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $79 = $9; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $80 = (($78) + ($79))|0; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $81 = (($75) + ($80<<3)|0); //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $82 = +HEAPF64[$81>>3]; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $83 = $74 * $82; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $84 = $12; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $85 = $84 - $83; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $12 = $85; //@line 53 "../../src/tiny_ekf/tiny_ekf.c"
-    $86 = $11; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-    $87 = (($86) + 1)|0; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-    $11 = $87; //@line 52 "../../src/tiny_ekf/tiny_ekf.c"
-   }
-   $88 = $12; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $89 = $7; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $90 = $10; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $91 = (($89) + ($90<<3)|0); //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $92 = +HEAPF64[$91>>3]; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $93 = $88 / $92; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $94 = $6; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $95 = $10; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $96 = $8; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $97 = Math_imul($95, $96)|0; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $98 = $9; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $99 = (($97) + ($98))|0; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $100 = (($94) + ($99<<3)|0); //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   HEAPF64[$100>>3] = $93; //@line 55 "../../src/tiny_ekf/tiny_ekf.c"
-   $101 = $10; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-   $102 = (($101) + 1)|0; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $102; //@line 50 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $103 = $9; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
-  $104 = (($103) + 1)|0; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
-  $9 = $104; //@line 48 "../../src/tiny_ekf/tiny_ekf.c"
- }
- $4 = 0; //@line 59 "../../src/tiny_ekf/tiny_ekf.c"
- $105 = $4; //@line 60 "../../src/tiny_ekf/tiny_ekf.c"
- STACKTOP = sp;return ($105|0); //@line 60 "../../src/tiny_ekf/tiny_ekf.c"
-}
-function _choldc1($0,$1,$2) {
- $0 = $0|0;
- $1 = $1|0;
- $2 = $2|0;
- var $10 = 0.0, $11 = 0, $12 = 0, $13 = 0, $14 = 0, $15 = 0, $16 = 0, $17 = 0, $18 = 0, $19 = 0, $20 = 0, $21 = 0, $22 = 0, $23 = 0, $24 = 0, $25 = 0.0, $26 = 0, $27 = 0, $28 = 0, $29 = 0;
- var $3 = 0, $30 = 0, $31 = 0, $32 = 0, $33 = 0, $34 = 0, $35 = 0, $36 = 0, $37 = 0.0, $38 = 0, $39 = 0, $4 = 0, $40 = 0, $41 = 0, $42 = 0, $43 = 0, $44 = 0, $45 = 0.0, $46 = 0.0, $47 = 0.0;
- var $48 = 0.0, $49 = 0, $5 = 0, $50 = 0, $51 = 0, $52 = 0, $53 = 0, $54 = 0.0, $55 = 0, $56 = 0.0, $57 = 0.0, $58 = 0, $59 = 0, $6 = 0, $60 = 0, $61 = 0, $62 = 0, $63 = 0, $64 = 0.0, $65 = 0.0;
- var $66 = 0, $67 = 0, $68 = 0, $69 = 0, $7 = 0, $70 = 0, $71 = 0, $72 = 0, $73 = 0, $74 = 0, $75 = 0, $76 = 0, $77 = 0, $8 = 0, $9 = 0, label = 0, sp = 0;
- sp = STACKTOP;
- STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $4 = $0;
- $5 = $1;
- $6 = $2;
- $7 = 0; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
- L1: while(1) {
-  $11 = $7; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
-  $12 = $6; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
-  $13 = ($11|0)<($12|0); //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
-  if (!($13)) {
-   label = 15;
-   break;
-  }
-  $14 = $7; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-  $8 = $14; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-  while(1) {
-   $15 = $8; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-   $16 = $6; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-   $17 = ($15|0)<($16|0); //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-   if (!($17)) {
-    break;
-   }
-   $18 = $4; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $19 = $7; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $20 = $6; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $21 = Math_imul($19, $20)|0; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $22 = $8; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $23 = (($21) + ($22))|0; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $24 = (($18) + ($23<<3)|0); //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $25 = +HEAPF64[$24>>3]; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $10 = $25; //@line 22 "../../src/tiny_ekf/tiny_ekf.c"
-   $26 = $7; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-   $27 = (($26) - 1)|0; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-   $9 = $27; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-   while(1) {
-    $28 = $9; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-    $29 = ($28|0)>=(0); //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-    if (!($29)) {
-     break;
-    }
-    $30 = $4; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $31 = $7; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $32 = $6; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $33 = Math_imul($31, $32)|0; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $34 = $9; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $35 = (($33) + ($34))|0; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $36 = (($30) + ($35<<3)|0); //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $37 = +HEAPF64[$36>>3]; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $38 = $4; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $39 = $8; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $40 = $6; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $41 = Math_imul($39, $40)|0; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $42 = $9; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $43 = (($41) + ($42))|0; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $44 = (($38) + ($43<<3)|0); //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $45 = +HEAPF64[$44>>3]; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $46 = $37 * $45; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $47 = $10; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $48 = $47 - $46; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $10 = $48; //@line 24 "../../src/tiny_ekf/tiny_ekf.c"
-    $49 = $9; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-    $50 = (($49) + -1)|0; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-    $9 = $50; //@line 23 "../../src/tiny_ekf/tiny_ekf.c"
-   }
-   $51 = $7; //@line 26 "../../src/tiny_ekf/tiny_ekf.c"
-   $52 = $8; //@line 26 "../../src/tiny_ekf/tiny_ekf.c"
-   $53 = ($51|0)==($52|0); //@line 26 "../../src/tiny_ekf/tiny_ekf.c"
-   $54 = $10;
-   if ($53) {
-    $55 = $54 <= 0.0; //@line 27 "../../src/tiny_ekf/tiny_ekf.c"
-    if ($55) {
-     label = 10;
-     break L1;
-    }
-    $56 = $10; //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-    $57 = (+Math_sqrt((+$56))); //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-    $58 = $5; //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-    $59 = $7; //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-    $60 = (($58) + ($59<<3)|0); //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-    HEAPF64[$60>>3] = $57; //@line 30 "../../src/tiny_ekf/tiny_ekf.c"
-   } else {
-    $61 = $5; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $62 = $7; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $63 = (($61) + ($62<<3)|0); //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $64 = +HEAPF64[$63>>3]; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $65 = $54 / $64; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $66 = $4; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $67 = $8; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $68 = $6; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $69 = Math_imul($67, $68)|0; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $70 = $7; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $71 = (($69) + ($70))|0; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    $72 = (($66) + ($71<<3)|0); //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-    HEAPF64[$72>>3] = $65; //@line 33 "../../src/tiny_ekf/tiny_ekf.c"
-   }
-   $73 = $8; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-   $74 = (($73) + 1)|0; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-   $8 = $74; //@line 21 "../../src/tiny_ekf/tiny_ekf.c"
-  }
-  $75 = $7; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
-  $76 = (($75) + 1)|0; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
-  $7 = $76; //@line 20 "../../src/tiny_ekf/tiny_ekf.c"
- }
- if ((label|0) == 10) {
-  $3 = 1; //@line 28 "../../src/tiny_ekf/tiny_ekf.c"
-  $77 = $3; //@line 39 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($77|0); //@line 39 "../../src/tiny_ekf/tiny_ekf.c"
- }
- else if ((label|0) == 15) {
-  $3 = 0; //@line 38 "../../src/tiny_ekf/tiny_ekf.c"
-  $77 = $3; //@line 39 "../../src/tiny_ekf/tiny_ekf.c"
-  STACKTOP = sp;return ($77|0); //@line 39 "../../src/tiny_ekf/tiny_ekf.c"
- }
- return (0)|0;
+ $3 = sp + 4|0;
+ $4 = sp;
+ $1 = $0;
+ $5 = $1; //@line 152 "src/imu/MadgwickAHRS.c"
+ $6 = 0.5 * $5; //@line 152 "src/imu/MadgwickAHRS.c"
+ $2 = $6; //@line 152 "src/imu/MadgwickAHRS.c"
+ $7 = $1; //@line 153 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$3>>2] = $7; //@line 153 "src/imu/MadgwickAHRS.c"
+ $8 = HEAP32[$3>>2]|0; //@line 154 "src/imu/MadgwickAHRS.c"
+ HEAP32[$4>>2] = $8; //@line 154 "src/imu/MadgwickAHRS.c"
+ $9 = HEAP32[$4>>2]|0; //@line 155 "src/imu/MadgwickAHRS.c"
+ $10 = $9 >> 1; //@line 155 "src/imu/MadgwickAHRS.c"
+ $11 = (1597463007 - ($10))|0; //@line 155 "src/imu/MadgwickAHRS.c"
+ HEAP32[$4>>2] = $11; //@line 155 "src/imu/MadgwickAHRS.c"
+ $12 = +HEAPF32[$4>>2]; //@line 156 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$3>>2] = $12; //@line 156 "src/imu/MadgwickAHRS.c"
+ $13 = +HEAPF32[$3>>2]; //@line 157 "src/imu/MadgwickAHRS.c"
+ $14 = $2; //@line 157 "src/imu/MadgwickAHRS.c"
+ $15 = +HEAPF32[$3>>2]; //@line 157 "src/imu/MadgwickAHRS.c"
+ $16 = $14 * $15; //@line 157 "src/imu/MadgwickAHRS.c"
+ $17 = +HEAPF32[$3>>2]; //@line 157 "src/imu/MadgwickAHRS.c"
+ $18 = $16 * $17; //@line 157 "src/imu/MadgwickAHRS.c"
+ $19 = 1.5 - $18; //@line 157 "src/imu/MadgwickAHRS.c"
+ $20 = $13 * $19; //@line 157 "src/imu/MadgwickAHRS.c"
+ HEAPF32[$3>>2] = $20; //@line 157 "src/imu/MadgwickAHRS.c"
+ $21 = +HEAPF32[$3>>2]; //@line 158 "src/imu/MadgwickAHRS.c"
+ STACKTOP = sp;return (+$21); //@line 158 "src/imu/MadgwickAHRS.c"
 }
 function __GLOBAL__sub_I_bind_cpp() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- ___cxx_global_var_init_29();
+ ___cxx_global_var_init_18();
  return;
 }
-function ___cxx_global_var_init_29() {
+function ___cxx_global_var_init_18() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- __ZN53EmscriptenBindingInitializer_native_and_builtin_typesC2Ev(4829); //@line 95 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN53EmscriptenBindingInitializer_native_and_builtin_typesC2Ev(4653); //@line 95 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  return; //@line 95 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
 }
 function __ZN53EmscriptenBindingInitializer_native_and_builtin_typesC2Ev($0) {
@@ -8619,46 +6284,46 @@ function __ZN53EmscriptenBindingInitializer_native_and_builtin_typesC2Ev($0) {
  STACKTOP = STACKTOP + 16|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(16|0);
  $1 = $0;
  $2 = (__ZN10emscripten8internal6TypeIDIvE3getEv()|0); //@line 98 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_void(($2|0),(1202|0)); //@line 98 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_void(($2|0),(1207|0)); //@line 98 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  $3 = (__ZN10emscripten8internal6TypeIDIbE3getEv()|0); //@line 100 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_bool(($3|0),(1207|0),1,1,0); //@line 100 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIcEEvPKc(1212); //@line 102 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIaEEvPKc(1217); //@line 103 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIhEEvPKc(1229); //@line 104 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIsEEvPKc(1243); //@line 105 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerItEEvPKc(1249); //@line 106 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIiEEvPKc(1264); //@line 107 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIjEEvPKc(1268); //@line 108 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerIlEEvPKc(1281); //@line 109 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_116register_integerImEEvPKc(1286); //@line 110 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_114register_floatIfEEvPKc(1300); //@line 112 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_114register_floatIdEEvPKc(1306); //@line 113 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_bool(($3|0),(1212|0),1,1,0); //@line 100 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIcEEvPKc(1217); //@line 102 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIaEEvPKc(1222); //@line 103 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIhEEvPKc(1234); //@line 104 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIsEEvPKc(1248); //@line 105 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerItEEvPKc(1254); //@line 106 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIiEEvPKc(1269); //@line 107 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIjEEvPKc(1273); //@line 108 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerIlEEvPKc(1286); //@line 109 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_116register_integerImEEvPKc(1291); //@line 110 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_114register_floatIfEEvPKc(1305); //@line 112 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_114register_floatIdEEvPKc(1311); //@line 113 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  $4 = (__ZN10emscripten8internal6TypeIDINSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEE3getEv()|0); //@line 115 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_std_string(($4|0),(1313|0)); //@line 115 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_std_string(($4|0),(1318|0)); //@line 115 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  $5 = (__ZN10emscripten8internal6TypeIDINSt3__212basic_stringIhNS2_11char_traitsIhEENS2_9allocatorIhEEEEE3getEv()|0); //@line 116 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_std_string(($5|0),(1325|0)); //@line 116 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_std_string(($5|0),(1330|0)); //@line 116 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  $6 = (__ZN10emscripten8internal6TypeIDINSt3__212basic_stringIwNS2_11char_traitsIwEENS2_9allocatorIwEEEEE3getEv()|0); //@line 117 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_std_wstring(($6|0),4,(1358|0)); //@line 117 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_std_wstring(($6|0),4,(1363|0)); //@line 117 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  $7 = (__ZN10emscripten8internal6TypeIDINS_3valEE3getEv()|0); //@line 118 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __embind_register_emval(($7|0),(1371|0)); //@line 118 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIcEEvPKc(1387); //@line 126 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIaEEvPKc(1417); //@line 127 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIhEEvPKc(1454); //@line 128 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIsEEvPKc(1493); //@line 130 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewItEEvPKc(1524); //@line 131 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIiEEvPKc(1564); //@line 132 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIjEEvPKc(1593); //@line 133 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIlEEvPKc(1631); //@line 134 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewImEEvPKc(1661); //@line 135 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIaEEvPKc(1700); //@line 137 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIhEEvPKc(1732); //@line 138 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIsEEvPKc(1765); //@line 139 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewItEEvPKc(1798); //@line 140 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIiEEvPKc(1832); //@line 141 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIjEEvPKc(1865); //@line 142 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIfEEvPKc(1899); //@line 144 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIdEEvPKc(1930); //@line 145 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
- __ZN12_GLOBAL__N_120register_memory_viewIeEEvPKc(1962); //@line 147 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __embind_register_emval(($7|0),(1376|0)); //@line 118 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIcEEvPKc(1392); //@line 126 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIaEEvPKc(1422); //@line 127 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIhEEvPKc(1459); //@line 128 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIsEEvPKc(1498); //@line 130 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewItEEvPKc(1529); //@line 131 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIiEEvPKc(1569); //@line 132 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIjEEvPKc(1598); //@line 133 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIlEEvPKc(1636); //@line 134 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewImEEvPKc(1666); //@line 135 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIaEEvPKc(1705); //@line 137 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIhEEvPKc(1737); //@line 138 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIsEEvPKc(1770); //@line 139 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewItEEvPKc(1803); //@line 140 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIiEEvPKc(1837); //@line 141 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIjEEvPKc(1870); //@line 142 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIfEEvPKc(1904); //@line 144 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIdEEvPKc(1935); //@line 145 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
+ __ZN12_GLOBAL__N_120register_memory_viewIeEEvPKc(1967); //@line 147 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
  STACKTOP = sp;return; //@line 149 "/emsdk_portable/sdk/system/lib/embind/bind.cpp"
 }
 function __ZN10emscripten8internal6TypeIDIvE3getEv() {
@@ -8986,7 +6651,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIeEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIeEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (48|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (152|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIdEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9002,7 +6667,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIdEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIdEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (56|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (160|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIfEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9018,7 +6683,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIfEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIfEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (64|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (168|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewImEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9034,7 +6699,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexImEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewImEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (72|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (176|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIlEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9050,7 +6715,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIlEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIlEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (80|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (184|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIjEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9066,7 +6731,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIjEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIjEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (88|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (192|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIiEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9082,7 +6747,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIiEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIiEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (96|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (200|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewItEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9098,7 +6763,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexItEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewItEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (104|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (208|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIsEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9114,7 +6779,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIsEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIsEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (112|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (216|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIhEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9130,7 +6795,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIhEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIhEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (120|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (224|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIaEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9146,7 +6811,7 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIaEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIaEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (128|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (232|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDINS_11memory_viewIcEEE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9162,27 +6827,27 @@ function __ZN12_GLOBAL__N_118getTypedArrayIndexIcEENS_15TypedArrayIndexEv() {
 function __ZN10emscripten8internal11LightTypeIDINS_11memory_viewIcEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (136|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (240|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDINS_3valEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (144|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (248|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDINSt3__212basic_stringIwNS2_11char_traitsIwEENS2_9allocatorIwEEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (152|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (256|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDINSt3__212basic_stringIhNS2_11char_traitsIhEENS2_9allocatorIhEEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (184|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (288|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDINSt3__212basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (208|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (312|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIdE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9193,7 +6858,7 @@ function __ZN10emscripten8internal6TypeIDIdE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIdE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (440|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (544|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIfE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9204,7 +6869,7 @@ function __ZN10emscripten8internal6TypeIDIfE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIfE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (432|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (536|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDImE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9215,7 +6880,7 @@ function __ZN10emscripten8internal6TypeIDImE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDImE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (424|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (528|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIlE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9226,7 +6891,7 @@ function __ZN10emscripten8internal6TypeIDIlE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIlE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (416|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (520|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIjE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9237,7 +6902,7 @@ function __ZN10emscripten8internal6TypeIDIjE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIjE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (408|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (512|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIiE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9248,7 +6913,7 @@ function __ZN10emscripten8internal6TypeIDIiE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIiE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (400|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (504|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDItE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9259,7 +6924,7 @@ function __ZN10emscripten8internal6TypeIDItE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDItE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (392|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (496|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIsE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9270,7 +6935,7 @@ function __ZN10emscripten8internal6TypeIDIsE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIsE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (384|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (488|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIhE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9281,7 +6946,7 @@ function __ZN10emscripten8internal6TypeIDIhE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIhE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (368|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (472|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIaE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9292,7 +6957,7 @@ function __ZN10emscripten8internal6TypeIDIaE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIaE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (376|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (480|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal6TypeIDIcE3getEv() {
  var $0 = 0, label = 0, sp = 0;
@@ -9303,17 +6968,17 @@ function __ZN10emscripten8internal6TypeIDIcE3getEv() {
 function __ZN10emscripten8internal11LightTypeIDIcE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (360|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (464|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDIbE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (352|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (456|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function __ZN10emscripten8internal11LightTypeIDIvE3getEv() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (336|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
+ return (440|0); //@line 62 "/emsdk_portable/sdk/system/include/emscripten/wire.h"
 }
 function ___getTypeName($0) {
  $0 = $0|0;
@@ -9402,7 +7067,7 @@ function _malloc($0) {
    $5 = $4 & -8;
    $6 = $3 ? 16 : $5;
    $7 = $6 >>> 3;
-   $8 = HEAP32[1078]|0;
+   $8 = HEAP32[1034]|0;
    $9 = $8 >>> $7;
    $10 = $9 & 3;
    $11 = ($10|0)==(0);
@@ -9411,7 +7076,7 @@ function _malloc($0) {
     $13 = $12 ^ 1;
     $14 = (($13) + ($7))|0;
     $15 = $14 << 1;
-    $16 = (4352 + ($15<<2)|0);
+    $16 = (4176 + ($15<<2)|0);
     $17 = ((($16)) + 8|0);
     $18 = HEAP32[$17>>2]|0;
     $19 = ((($18)) + 8|0);
@@ -9422,9 +7087,9 @@ function _malloc($0) {
       $22 = 1 << $14;
       $23 = $22 ^ -1;
       $24 = $8 & $23;
-      HEAP32[1078] = $24;
+      HEAP32[1034] = $24;
      } else {
-      $25 = HEAP32[(4328)>>2]|0;
+      $25 = HEAP32[(4152)>>2]|0;
       $26 = ($25>>>0)>($20>>>0);
       if ($26) {
        _abort();
@@ -9455,7 +7120,7 @@ function _malloc($0) {
     $$0 = $19;
     STACKTOP = sp;return ($$0|0);
    }
-   $37 = HEAP32[(4320)>>2]|0;
+   $37 = HEAP32[(4144)>>2]|0;
    $38 = ($6>>>0)>($37>>>0);
    if ($38) {
     $39 = ($9|0)==(0);
@@ -9489,7 +7154,7 @@ function _malloc($0) {
      $66 = $62 >>> $64;
      $67 = (($65) + ($66))|0;
      $68 = $67 << 1;
-     $69 = (4352 + ($68<<2)|0);
+     $69 = (4176 + ($68<<2)|0);
      $70 = ((($69)) + 8|0);
      $71 = HEAP32[$70>>2]|0;
      $72 = ((($71)) + 8|0);
@@ -9500,10 +7165,10 @@ function _malloc($0) {
        $75 = 1 << $67;
        $76 = $75 ^ -1;
        $77 = $8 & $76;
-       HEAP32[1078] = $77;
+       HEAP32[1034] = $77;
        $98 = $77;
       } else {
-       $78 = HEAP32[(4328)>>2]|0;
+       $78 = HEAP32[(4152)>>2]|0;
        $79 = ($78>>>0)>($73>>>0);
        if ($79) {
         _abort();
@@ -9536,22 +7201,22 @@ function _malloc($0) {
      HEAP32[$90>>2] = $84;
      $91 = ($37|0)==(0);
      if (!($91)) {
-      $92 = HEAP32[(4332)>>2]|0;
+      $92 = HEAP32[(4156)>>2]|0;
       $93 = $37 >>> 3;
       $94 = $93 << 1;
-      $95 = (4352 + ($94<<2)|0);
+      $95 = (4176 + ($94<<2)|0);
       $96 = 1 << $93;
       $97 = $98 & $96;
       $99 = ($97|0)==(0);
       if ($99) {
        $100 = $98 | $96;
-       HEAP32[1078] = $100;
+       HEAP32[1034] = $100;
        $$pre = ((($95)) + 8|0);
        $$0199 = $95;$$pre$phiZ2D = $$pre;
       } else {
        $101 = ((($95)) + 8|0);
        $102 = HEAP32[$101>>2]|0;
-       $103 = HEAP32[(4328)>>2]|0;
+       $103 = HEAP32[(4152)>>2]|0;
        $104 = ($103>>>0)>($102>>>0);
        if ($104) {
         _abort();
@@ -9568,12 +7233,12 @@ function _malloc($0) {
       $107 = ((($92)) + 12|0);
       HEAP32[$107>>2] = $95;
      }
-     HEAP32[(4320)>>2] = $84;
-     HEAP32[(4332)>>2] = $87;
+     HEAP32[(4144)>>2] = $84;
+     HEAP32[(4156)>>2] = $87;
      $$0 = $72;
      STACKTOP = sp;return ($$0|0);
     }
-    $108 = HEAP32[(4316)>>2]|0;
+    $108 = HEAP32[(4140)>>2]|0;
     $109 = ($108|0)==(0);
     if ($109) {
      $$0197 = $6;
@@ -9601,7 +7266,7 @@ function _malloc($0) {
      $130 = $126 | $129;
      $131 = $127 >>> $129;
      $132 = (($130) + ($131))|0;
-     $133 = (4616 + ($132<<2)|0);
+     $133 = (4440 + ($132<<2)|0);
      $134 = HEAP32[$133>>2]|0;
      $135 = ((($134)) + 4|0);
      $136 = HEAP32[$135>>2]|0;
@@ -9633,7 +7298,7 @@ function _malloc($0) {
       $spec$select1$i = $150 ? $146 : $$0190$i;
       $$0189$i = $146;$$0190$i = $spec$select1$i;$$0191$i = $spec$select$i;
      }
-     $151 = HEAP32[(4328)>>2]|0;
+     $151 = HEAP32[(4152)>>2]|0;
      $152 = ($151>>>0)>($$0190$i>>>0);
      if ($152) {
       _abort();
@@ -9730,7 +7395,7 @@ function _malloc($0) {
       if (!($182)) {
        $183 = ((($$0190$i)) + 28|0);
        $184 = HEAP32[$183>>2]|0;
-       $185 = (4616 + ($184<<2)|0);
+       $185 = (4440 + ($184<<2)|0);
        $186 = HEAP32[$185>>2]|0;
        $187 = ($$0190$i|0)==($186|0);
        do {
@@ -9741,11 +7406,11 @@ function _malloc($0) {
           $188 = 1 << $184;
           $189 = $188 ^ -1;
           $190 = $108 & $189;
-          HEAP32[(4316)>>2] = $190;
+          HEAP32[(4140)>>2] = $190;
           break L78;
          }
         } else {
-         $191 = HEAP32[(4328)>>2]|0;
+         $191 = HEAP32[(4152)>>2]|0;
          $192 = ($191>>>0)>($156>>>0);
          if ($192) {
           _abort();
@@ -9766,7 +7431,7 @@ function _malloc($0) {
          }
         }
        } while(0);
-       $198 = HEAP32[(4328)>>2]|0;
+       $198 = HEAP32[(4152)>>2]|0;
        $199 = ($198>>>0)>($$3$i>>>0);
        if ($199) {
         _abort();
@@ -9796,7 +7461,7 @@ function _malloc($0) {
        $208 = HEAP32[$207>>2]|0;
        $209 = ($208|0)==(0|0);
        if (!($209)) {
-        $210 = HEAP32[(4328)>>2]|0;
+        $210 = HEAP32[(4152)>>2]|0;
         $211 = ($210>>>0)>($208>>>0);
         if ($211) {
          _abort();
@@ -9833,22 +7498,22 @@ function _malloc($0) {
       HEAP32[$226>>2] = $$0191$i;
       $227 = ($37|0)==(0);
       if (!($227)) {
-       $228 = HEAP32[(4332)>>2]|0;
+       $228 = HEAP32[(4156)>>2]|0;
        $229 = $37 >>> 3;
        $230 = $229 << 1;
-       $231 = (4352 + ($230<<2)|0);
+       $231 = (4176 + ($230<<2)|0);
        $232 = 1 << $229;
        $233 = $232 & $8;
        $234 = ($233|0)==(0);
        if ($234) {
         $235 = $232 | $8;
-        HEAP32[1078] = $235;
+        HEAP32[1034] = $235;
         $$pre$i = ((($231)) + 8|0);
         $$0187$i = $231;$$pre$phi$iZ2D = $$pre$i;
        } else {
         $236 = ((($231)) + 8|0);
         $237 = HEAP32[$236>>2]|0;
-        $238 = HEAP32[(4328)>>2]|0;
+        $238 = HEAP32[(4152)>>2]|0;
         $239 = ($238>>>0)>($237>>>0);
         if ($239) {
          _abort();
@@ -9865,8 +7530,8 @@ function _malloc($0) {
        $242 = ((($228)) + 12|0);
        HEAP32[$242>>2] = $231;
       }
-      HEAP32[(4320)>>2] = $$0191$i;
-      HEAP32[(4332)>>2] = $153;
+      HEAP32[(4144)>>2] = $$0191$i;
+      HEAP32[(4156)>>2] = $153;
      }
      $243 = ((($$0190$i)) + 8|0);
      $$0 = $243;
@@ -9882,7 +7547,7 @@ function _malloc($0) {
    } else {
     $245 = (($0) + 11)|0;
     $246 = $245 & -8;
-    $247 = HEAP32[(4316)>>2]|0;
+    $247 = HEAP32[(4140)>>2]|0;
     $248 = ($247|0)==(0);
     if ($248) {
      $$0197 = $246;
@@ -9922,7 +7587,7 @@ function _malloc($0) {
        $$0357$i = $274;
       }
      }
-     $275 = (4616 + ($$0357$i<<2)|0);
+     $275 = (4440 + ($$0357$i<<2)|0);
      $276 = HEAP32[$275>>2]|0;
      $277 = ($276|0)==(0|0);
      L122: do {
@@ -10012,7 +7677,7 @@ function _malloc($0) {
        $324 = $320 | $323;
        $325 = $321 >>> $323;
        $326 = (($324) + ($325))|0;
-       $327 = (4616 + ($326<<2)|0);
+       $327 = (4440 + ($326<<2)|0);
        $328 = HEAP32[$327>>2]|0;
        $$3$i203218 = 0;$$4355$i = $328;
       } else {
@@ -10059,11 +7724,11 @@ function _malloc($0) {
      if ($342) {
       $$0197 = $246;
      } else {
-      $343 = HEAP32[(4320)>>2]|0;
+      $343 = HEAP32[(4144)>>2]|0;
       $344 = (($343) - ($246))|0;
       $345 = ($$4349$lcssa$i>>>0)<($344>>>0);
       if ($345) {
-       $346 = HEAP32[(4328)>>2]|0;
+       $346 = HEAP32[(4152)>>2]|0;
        $347 = ($346>>>0)>($$4$lcssa$i>>>0);
        if ($347) {
         _abort();
@@ -10162,7 +7827,7 @@ function _malloc($0) {
         } else {
          $378 = ((($$4$lcssa$i)) + 28|0);
          $379 = HEAP32[$378>>2]|0;
-         $380 = (4616 + ($379<<2)|0);
+         $380 = (4440 + ($379<<2)|0);
          $381 = HEAP32[$380>>2]|0;
          $382 = ($$4$lcssa$i|0)==($381|0);
          do {
@@ -10173,12 +7838,12 @@ function _malloc($0) {
             $383 = 1 << $379;
             $384 = $383 ^ -1;
             $385 = $247 & $384;
-            HEAP32[(4316)>>2] = $385;
+            HEAP32[(4140)>>2] = $385;
             $469 = $385;
             break L176;
            }
           } else {
-           $386 = HEAP32[(4328)>>2]|0;
+           $386 = HEAP32[(4152)>>2]|0;
            $387 = ($386>>>0)>($351>>>0);
            if ($387) {
             _abort();
@@ -10200,7 +7865,7 @@ function _malloc($0) {
            }
           }
          } while(0);
-         $393 = HEAP32[(4328)>>2]|0;
+         $393 = HEAP32[(4152)>>2]|0;
          $394 = ($393>>>0)>($$3371$i>>>0);
          if ($394) {
           _abort();
@@ -10232,7 +7897,7 @@ function _malloc($0) {
          if ($404) {
           $469 = $247;
          } else {
-          $405 = HEAP32[(4328)>>2]|0;
+          $405 = HEAP32[(4152)>>2]|0;
           $406 = ($405>>>0)>($403>>>0);
           if ($406) {
            _abort();
@@ -10273,20 +7938,20 @@ function _malloc($0) {
          $423 = ($$4349$lcssa$i>>>0)<(256);
          if ($423) {
           $424 = $422 << 1;
-          $425 = (4352 + ($424<<2)|0);
-          $426 = HEAP32[1078]|0;
+          $425 = (4176 + ($424<<2)|0);
+          $426 = HEAP32[1034]|0;
           $427 = 1 << $422;
           $428 = $426 & $427;
           $429 = ($428|0)==(0);
           if ($429) {
            $430 = $426 | $427;
-           HEAP32[1078] = $430;
+           HEAP32[1034] = $430;
            $$pre$i208 = ((($425)) + 8|0);
            $$0367$i = $425;$$pre$phi$i209Z2D = $$pre$i208;
           } else {
            $431 = ((($425)) + 8|0);
            $432 = HEAP32[$431>>2]|0;
-           $433 = HEAP32[(4328)>>2]|0;
+           $433 = HEAP32[(4152)>>2]|0;
            $434 = ($433>>>0)>($432>>>0);
            if ($434) {
             _abort();
@@ -10338,7 +8003,7 @@ function _malloc($0) {
            $$0360$i = $462;
           }
          }
-         $463 = (4616 + ($$0360$i<<2)|0);
+         $463 = (4440 + ($$0360$i<<2)|0);
          $464 = ((($348)) + 28|0);
          HEAP32[$464>>2] = $$0360$i;
          $465 = ((($348)) + 16|0);
@@ -10350,7 +8015,7 @@ function _malloc($0) {
          $470 = ($468|0)==(0);
          if ($470) {
           $471 = $469 | $467;
-          HEAP32[(4316)>>2] = $471;
+          HEAP32[(4140)>>2] = $471;
           HEAP32[$463>>2] = $348;
           $472 = ((($348)) + 24|0);
           HEAP32[$472>>2] = $463;
@@ -10395,7 +8060,7 @@ function _malloc($0) {
              $$034217$i = $485;$$034316$i = $487;
             }
            }
-           $494 = HEAP32[(4328)>>2]|0;
+           $494 = HEAP32[(4152)>>2]|0;
            $495 = ($494>>>0)>($492>>>0);
            if ($495) {
             _abort();
@@ -10414,7 +8079,7 @@ function _malloc($0) {
          } while(0);
          $499 = ((($$0343$lcssa$i)) + 8|0);
          $500 = HEAP32[$499>>2]|0;
-         $501 = HEAP32[(4328)>>2]|0;
+         $501 = HEAP32[(4152)>>2]|0;
          $502 = ($501>>>0)<=($$0343$lcssa$i>>>0);
          $503 = ($501>>>0)<=($500>>>0);
          $504 = $503 & $502;
@@ -10446,16 +8111,16 @@ function _malloc($0) {
    }
   }
  } while(0);
- $510 = HEAP32[(4320)>>2]|0;
+ $510 = HEAP32[(4144)>>2]|0;
  $511 = ($510>>>0)<($$0197>>>0);
  if (!($511)) {
   $512 = (($510) - ($$0197))|0;
-  $513 = HEAP32[(4332)>>2]|0;
+  $513 = HEAP32[(4156)>>2]|0;
   $514 = ($512>>>0)>(15);
   if ($514) {
    $515 = (($513) + ($$0197)|0);
-   HEAP32[(4332)>>2] = $515;
-   HEAP32[(4320)>>2] = $512;
+   HEAP32[(4156)>>2] = $515;
+   HEAP32[(4144)>>2] = $512;
    $516 = $512 | 1;
    $517 = ((($515)) + 4|0);
    HEAP32[$517>>2] = $516;
@@ -10465,8 +8130,8 @@ function _malloc($0) {
    $520 = ((($513)) + 4|0);
    HEAP32[$520>>2] = $519;
   } else {
-   HEAP32[(4320)>>2] = 0;
-   HEAP32[(4332)>>2] = 0;
+   HEAP32[(4144)>>2] = 0;
+   HEAP32[(4156)>>2] = 0;
    $521 = $510 | 3;
    $522 = ((($513)) + 4|0);
    HEAP32[$522>>2] = $521;
@@ -10480,14 +8145,14 @@ function _malloc($0) {
   $$0 = $527;
   STACKTOP = sp;return ($$0|0);
  }
- $528 = HEAP32[(4324)>>2]|0;
+ $528 = HEAP32[(4148)>>2]|0;
  $529 = ($528>>>0)>($$0197>>>0);
  if ($529) {
   $530 = (($528) - ($$0197))|0;
-  HEAP32[(4324)>>2] = $530;
-  $531 = HEAP32[(4336)>>2]|0;
+  HEAP32[(4148)>>2] = $530;
+  $531 = HEAP32[(4160)>>2]|0;
   $532 = (($531) + ($$0197)|0);
-  HEAP32[(4336)>>2] = $532;
+  HEAP32[(4160)>>2] = $532;
   $533 = $530 | 1;
   $534 = ((($532)) + 4|0);
   HEAP32[$534>>2] = $533;
@@ -10498,22 +8163,22 @@ function _malloc($0) {
   $$0 = $537;
   STACKTOP = sp;return ($$0|0);
  }
- $538 = HEAP32[1196]|0;
+ $538 = HEAP32[1152]|0;
  $539 = ($538|0)==(0);
  if ($539) {
-  HEAP32[(4792)>>2] = 4096;
-  HEAP32[(4788)>>2] = 4096;
-  HEAP32[(4796)>>2] = -1;
-  HEAP32[(4800)>>2] = -1;
-  HEAP32[(4804)>>2] = 0;
-  HEAP32[(4756)>>2] = 0;
+  HEAP32[(4616)>>2] = 4096;
+  HEAP32[(4612)>>2] = 4096;
+  HEAP32[(4620)>>2] = -1;
+  HEAP32[(4624)>>2] = -1;
+  HEAP32[(4628)>>2] = 0;
+  HEAP32[(4580)>>2] = 0;
   $540 = $1;
   $541 = $540 & -16;
   $542 = $541 ^ 1431655768;
-  HEAP32[1196] = $542;
+  HEAP32[1152] = $542;
   $546 = 4096;
  } else {
-  $$pre$i210 = HEAP32[(4792)>>2]|0;
+  $$pre$i210 = HEAP32[(4616)>>2]|0;
   $546 = $$pre$i210;
  }
  $543 = (($$0197) + 48)|0;
@@ -10526,10 +8191,10 @@ function _malloc($0) {
   $$0 = 0;
   STACKTOP = sp;return ($$0|0);
  }
- $550 = HEAP32[(4752)>>2]|0;
+ $550 = HEAP32[(4576)>>2]|0;
  $551 = ($550|0)==(0);
  if (!($551)) {
-  $552 = HEAP32[(4744)>>2]|0;
+  $552 = HEAP32[(4568)>>2]|0;
   $553 = (($552) + ($548))|0;
   $554 = ($553>>>0)<=($552>>>0);
   $555 = ($553>>>0)>($550>>>0);
@@ -10539,18 +8204,18 @@ function _malloc($0) {
    STACKTOP = sp;return ($$0|0);
   }
  }
- $556 = HEAP32[(4756)>>2]|0;
+ $556 = HEAP32[(4580)>>2]|0;
  $557 = $556 & 4;
  $558 = ($557|0)==(0);
  L257: do {
   if ($558) {
-   $559 = HEAP32[(4336)>>2]|0;
+   $559 = HEAP32[(4160)>>2]|0;
    $560 = ($559|0)==(0|0);
    L259: do {
     if ($560) {
      label = 173;
     } else {
-     $$0$i$i = (4760);
+     $$0$i$i = (4584);
      while(1) {
       $561 = HEAP32[$$0$i$i>>2]|0;
       $562 = ($561>>>0)>($559>>>0);
@@ -10609,7 +8274,7 @@ function _malloc($0) {
       $$2234243136$i = 0;
      } else {
       $572 = $570;
-      $573 = HEAP32[(4788)>>2]|0;
+      $573 = HEAP32[(4612)>>2]|0;
       $574 = (($573) + -1)|0;
       $575 = $574 & $572;
       $576 = ($575|0)==(0);
@@ -10619,13 +8284,13 @@ function _malloc($0) {
       $580 = (($579) - ($572))|0;
       $581 = $576 ? 0 : $580;
       $spec$select49$i = (($581) + ($548))|0;
-      $582 = HEAP32[(4744)>>2]|0;
+      $582 = HEAP32[(4568)>>2]|0;
       $583 = (($spec$select49$i) + ($582))|0;
       $584 = ($spec$select49$i>>>0)>($$0197>>>0);
       $585 = ($spec$select49$i>>>0)<(2147483647);
       $or$cond$i213 = $584 & $585;
       if ($or$cond$i213) {
-       $586 = HEAP32[(4752)>>2]|0;
+       $586 = HEAP32[(4576)>>2]|0;
        $587 = ($586|0)==(0);
        if (!($587)) {
         $588 = ($583>>>0)<=($582>>>0);
@@ -10671,7 +8336,7 @@ function _malloc($0) {
        break L257;
       }
      }
-     $606 = HEAP32[(4792)>>2]|0;
+     $606 = HEAP32[(4616)>>2]|0;
      $607 = (($544) - ($$2253$ph$i))|0;
      $608 = (($607) + ($606))|0;
      $609 = (0 - ($606))|0;
@@ -10696,9 +8361,9 @@ function _malloc($0) {
      }
     }
    } while(0);
-   $616 = HEAP32[(4756)>>2]|0;
+   $616 = HEAP32[(4580)>>2]|0;
    $617 = $616 | 4;
-   HEAP32[(4756)>>2] = $617;
+   HEAP32[(4580)>>2] = $617;
    $$4236$i = $$2234243136$i;
    label = 188;
   } else {
@@ -10734,31 +8399,75 @@ function _malloc($0) {
   }
  }
  if ((label|0) == 190) {
-  $631 = HEAP32[(4744)>>2]|0;
+  $631 = HEAP32[(4568)>>2]|0;
   $632 = (($631) + ($$723947$i))|0;
-  HEAP32[(4744)>>2] = $632;
-  $633 = HEAP32[(4748)>>2]|0;
+  HEAP32[(4568)>>2] = $632;
+  $633 = HEAP32[(4572)>>2]|0;
   $634 = ($632>>>0)>($633>>>0);
   if ($634) {
-   HEAP32[(4748)>>2] = $632;
+   HEAP32[(4572)>>2] = $632;
   }
-  $635 = HEAP32[(4336)>>2]|0;
+  $635 = HEAP32[(4160)>>2]|0;
   $636 = ($635|0)==(0|0);
   L294: do {
    if ($636) {
-    $637 = HEAP32[(4328)>>2]|0;
+    $637 = HEAP32[(4152)>>2]|0;
     $638 = ($637|0)==(0|0);
     $639 = ($$748$i>>>0)<($637>>>0);
     $or$cond11$i = $638 | $639;
     if ($or$cond11$i) {
-     HEAP32[(4328)>>2] = $$748$i;
+     HEAP32[(4152)>>2] = $$748$i;
     }
-    HEAP32[(4760)>>2] = $$748$i;
-    HEAP32[(4764)>>2] = $$723947$i;
-    HEAP32[(4772)>>2] = 0;
-    $640 = HEAP32[1196]|0;
-    HEAP32[(4348)>>2] = $640;
-    HEAP32[(4344)>>2] = -1;
+    HEAP32[(4584)>>2] = $$748$i;
+    HEAP32[(4588)>>2] = $$723947$i;
+    HEAP32[(4596)>>2] = 0;
+    $640 = HEAP32[1152]|0;
+    HEAP32[(4172)>>2] = $640;
+    HEAP32[(4168)>>2] = -1;
+    HEAP32[(4188)>>2] = (4176);
+    HEAP32[(4184)>>2] = (4176);
+    HEAP32[(4196)>>2] = (4184);
+    HEAP32[(4192)>>2] = (4184);
+    HEAP32[(4204)>>2] = (4192);
+    HEAP32[(4200)>>2] = (4192);
+    HEAP32[(4212)>>2] = (4200);
+    HEAP32[(4208)>>2] = (4200);
+    HEAP32[(4220)>>2] = (4208);
+    HEAP32[(4216)>>2] = (4208);
+    HEAP32[(4228)>>2] = (4216);
+    HEAP32[(4224)>>2] = (4216);
+    HEAP32[(4236)>>2] = (4224);
+    HEAP32[(4232)>>2] = (4224);
+    HEAP32[(4244)>>2] = (4232);
+    HEAP32[(4240)>>2] = (4232);
+    HEAP32[(4252)>>2] = (4240);
+    HEAP32[(4248)>>2] = (4240);
+    HEAP32[(4260)>>2] = (4248);
+    HEAP32[(4256)>>2] = (4248);
+    HEAP32[(4268)>>2] = (4256);
+    HEAP32[(4264)>>2] = (4256);
+    HEAP32[(4276)>>2] = (4264);
+    HEAP32[(4272)>>2] = (4264);
+    HEAP32[(4284)>>2] = (4272);
+    HEAP32[(4280)>>2] = (4272);
+    HEAP32[(4292)>>2] = (4280);
+    HEAP32[(4288)>>2] = (4280);
+    HEAP32[(4300)>>2] = (4288);
+    HEAP32[(4296)>>2] = (4288);
+    HEAP32[(4308)>>2] = (4296);
+    HEAP32[(4304)>>2] = (4296);
+    HEAP32[(4316)>>2] = (4304);
+    HEAP32[(4312)>>2] = (4304);
+    HEAP32[(4324)>>2] = (4312);
+    HEAP32[(4320)>>2] = (4312);
+    HEAP32[(4332)>>2] = (4320);
+    HEAP32[(4328)>>2] = (4320);
+    HEAP32[(4340)>>2] = (4328);
+    HEAP32[(4336)>>2] = (4328);
+    HEAP32[(4348)>>2] = (4336);
+    HEAP32[(4344)>>2] = (4336);
+    HEAP32[(4356)>>2] = (4344);
+    HEAP32[(4352)>>2] = (4344);
     HEAP32[(4364)>>2] = (4352);
     HEAP32[(4360)>>2] = (4352);
     HEAP32[(4372)>>2] = (4360);
@@ -10779,50 +8488,6 @@ function _malloc($0) {
     HEAP32[(4424)>>2] = (4416);
     HEAP32[(4436)>>2] = (4424);
     HEAP32[(4432)>>2] = (4424);
-    HEAP32[(4444)>>2] = (4432);
-    HEAP32[(4440)>>2] = (4432);
-    HEAP32[(4452)>>2] = (4440);
-    HEAP32[(4448)>>2] = (4440);
-    HEAP32[(4460)>>2] = (4448);
-    HEAP32[(4456)>>2] = (4448);
-    HEAP32[(4468)>>2] = (4456);
-    HEAP32[(4464)>>2] = (4456);
-    HEAP32[(4476)>>2] = (4464);
-    HEAP32[(4472)>>2] = (4464);
-    HEAP32[(4484)>>2] = (4472);
-    HEAP32[(4480)>>2] = (4472);
-    HEAP32[(4492)>>2] = (4480);
-    HEAP32[(4488)>>2] = (4480);
-    HEAP32[(4500)>>2] = (4488);
-    HEAP32[(4496)>>2] = (4488);
-    HEAP32[(4508)>>2] = (4496);
-    HEAP32[(4504)>>2] = (4496);
-    HEAP32[(4516)>>2] = (4504);
-    HEAP32[(4512)>>2] = (4504);
-    HEAP32[(4524)>>2] = (4512);
-    HEAP32[(4520)>>2] = (4512);
-    HEAP32[(4532)>>2] = (4520);
-    HEAP32[(4528)>>2] = (4520);
-    HEAP32[(4540)>>2] = (4528);
-    HEAP32[(4536)>>2] = (4528);
-    HEAP32[(4548)>>2] = (4536);
-    HEAP32[(4544)>>2] = (4536);
-    HEAP32[(4556)>>2] = (4544);
-    HEAP32[(4552)>>2] = (4544);
-    HEAP32[(4564)>>2] = (4552);
-    HEAP32[(4560)>>2] = (4552);
-    HEAP32[(4572)>>2] = (4560);
-    HEAP32[(4568)>>2] = (4560);
-    HEAP32[(4580)>>2] = (4568);
-    HEAP32[(4576)>>2] = (4568);
-    HEAP32[(4588)>>2] = (4576);
-    HEAP32[(4584)>>2] = (4576);
-    HEAP32[(4596)>>2] = (4584);
-    HEAP32[(4592)>>2] = (4584);
-    HEAP32[(4604)>>2] = (4592);
-    HEAP32[(4600)>>2] = (4592);
-    HEAP32[(4612)>>2] = (4600);
-    HEAP32[(4608)>>2] = (4600);
     $641 = (($$723947$i) + -40)|0;
     $642 = ((($$748$i)) + 8|0);
     $643 = $642;
@@ -10833,18 +8498,18 @@ function _malloc($0) {
     $648 = $645 ? 0 : $647;
     $649 = (($$748$i) + ($648)|0);
     $650 = (($641) - ($648))|0;
-    HEAP32[(4336)>>2] = $649;
-    HEAP32[(4324)>>2] = $650;
+    HEAP32[(4160)>>2] = $649;
+    HEAP32[(4148)>>2] = $650;
     $651 = $650 | 1;
     $652 = ((($649)) + 4|0);
     HEAP32[$652>>2] = $651;
     $653 = (($$748$i) + ($641)|0);
     $654 = ((($653)) + 4|0);
     HEAP32[$654>>2] = 40;
-    $655 = HEAP32[(4800)>>2]|0;
-    HEAP32[(4340)>>2] = $655;
+    $655 = HEAP32[(4624)>>2]|0;
+    HEAP32[(4164)>>2] = $655;
    } else {
-    $$024372$i = (4760);
+    $$024372$i = (4584);
     while(1) {
      $656 = HEAP32[$$024372$i>>2]|0;
      $657 = ((($$024372$i)) + 4|0);
@@ -10877,7 +8542,7 @@ function _malloc($0) {
       if ($or$cond51$i) {
        $671 = (($658) + ($$723947$i))|0;
        HEAP32[$664>>2] = $671;
-       $672 = HEAP32[(4324)>>2]|0;
+       $672 = HEAP32[(4148)>>2]|0;
        $673 = (($672) + ($$723947$i))|0;
        $674 = ((($635)) + 8|0);
        $675 = $674;
@@ -10888,30 +8553,30 @@ function _malloc($0) {
        $680 = $677 ? 0 : $679;
        $681 = (($635) + ($680)|0);
        $682 = (($673) - ($680))|0;
-       HEAP32[(4336)>>2] = $681;
-       HEAP32[(4324)>>2] = $682;
+       HEAP32[(4160)>>2] = $681;
+       HEAP32[(4148)>>2] = $682;
        $683 = $682 | 1;
        $684 = ((($681)) + 4|0);
        HEAP32[$684>>2] = $683;
        $685 = (($635) + ($673)|0);
        $686 = ((($685)) + 4|0);
        HEAP32[$686>>2] = 40;
-       $687 = HEAP32[(4800)>>2]|0;
-       HEAP32[(4340)>>2] = $687;
+       $687 = HEAP32[(4624)>>2]|0;
+       HEAP32[(4164)>>2] = $687;
        break;
       }
      }
     }
-    $688 = HEAP32[(4328)>>2]|0;
+    $688 = HEAP32[(4152)>>2]|0;
     $689 = ($$748$i>>>0)<($688>>>0);
     if ($689) {
-     HEAP32[(4328)>>2] = $$748$i;
+     HEAP32[(4152)>>2] = $$748$i;
      $752 = $$748$i;
     } else {
      $752 = $688;
     }
     $690 = (($$748$i) + ($$723947$i)|0);
-    $$124471$i = (4760);
+    $$124471$i = (4584);
     while(1) {
      $691 = HEAP32[$$124471$i>>2]|0;
      $692 = ($691|0)==($690|0);
@@ -10966,21 +8631,21 @@ function _malloc($0) {
       $726 = ($635|0)==($718|0);
       L317: do {
        if ($726) {
-        $727 = HEAP32[(4324)>>2]|0;
+        $727 = HEAP32[(4148)>>2]|0;
         $728 = (($727) + ($723))|0;
-        HEAP32[(4324)>>2] = $728;
-        HEAP32[(4336)>>2] = $722;
+        HEAP32[(4148)>>2] = $728;
+        HEAP32[(4160)>>2] = $722;
         $729 = $728 | 1;
         $730 = ((($722)) + 4|0);
         HEAP32[$730>>2] = $729;
        } else {
-        $731 = HEAP32[(4332)>>2]|0;
+        $731 = HEAP32[(4156)>>2]|0;
         $732 = ($731|0)==($718|0);
         if ($732) {
-         $733 = HEAP32[(4320)>>2]|0;
+         $733 = HEAP32[(4144)>>2]|0;
          $734 = (($733) + ($723))|0;
-         HEAP32[(4320)>>2] = $734;
-         HEAP32[(4332)>>2] = $722;
+         HEAP32[(4144)>>2] = $734;
+         HEAP32[(4156)>>2] = $722;
          $735 = $734 | 1;
          $736 = ((($722)) + 4|0);
          HEAP32[$736>>2] = $735;
@@ -11003,7 +8668,7 @@ function _malloc($0) {
            $747 = ((($718)) + 12|0);
            $748 = HEAP32[$747>>2]|0;
            $749 = $743 << 1;
-           $750 = (4352 + ($749<<2)|0);
+           $750 = (4176 + ($749<<2)|0);
            $751 = ($746|0)==($750|0);
            do {
             if (!($751)) {
@@ -11026,9 +8691,9 @@ function _malloc($0) {
            if ($757) {
             $758 = 1 << $743;
             $759 = $758 ^ -1;
-            $760 = HEAP32[1078]|0;
+            $760 = HEAP32[1034]|0;
             $761 = $760 & $759;
-            HEAP32[1078] = $761;
+            HEAP32[1034] = $761;
             break;
            }
            $762 = ($748|0)==($750|0);
@@ -11143,7 +8808,7 @@ function _malloc($0) {
            }
            $796 = ((($718)) + 28|0);
            $797 = HEAP32[$796>>2]|0;
-           $798 = (4616 + ($797<<2)|0);
+           $798 = (4440 + ($797<<2)|0);
            $799 = HEAP32[$798>>2]|0;
            $800 = ($799|0)==($718|0);
            do {
@@ -11155,12 +8820,12 @@ function _malloc($0) {
              }
              $801 = 1 << $797;
              $802 = $801 ^ -1;
-             $803 = HEAP32[(4316)>>2]|0;
+             $803 = HEAP32[(4140)>>2]|0;
              $804 = $803 & $802;
-             HEAP32[(4316)>>2] = $804;
+             HEAP32[(4140)>>2] = $804;
              break L325;
             } else {
-             $805 = HEAP32[(4328)>>2]|0;
+             $805 = HEAP32[(4152)>>2]|0;
              $806 = ($805>>>0)>($769>>>0);
              if ($806) {
               _abort();
@@ -11181,7 +8846,7 @@ function _malloc($0) {
              }
             }
            } while(0);
-           $812 = HEAP32[(4328)>>2]|0;
+           $812 = HEAP32[(4152)>>2]|0;
            $813 = ($812>>>0)>($$3$i$i>>>0);
            if ($813) {
             _abort();
@@ -11213,7 +8878,7 @@ function _malloc($0) {
            if ($823) {
             break;
            }
-           $824 = HEAP32[(4328)>>2]|0;
+           $824 = HEAP32[(4152)>>2]|0;
            $825 = ($824>>>0)>($822>>>0);
            if ($825) {
             _abort();
@@ -11246,21 +8911,21 @@ function _malloc($0) {
         $837 = ($$0286$i$i>>>0)<(256);
         if ($837) {
          $838 = $836 << 1;
-         $839 = (4352 + ($838<<2)|0);
-         $840 = HEAP32[1078]|0;
+         $839 = (4176 + ($838<<2)|0);
+         $840 = HEAP32[1034]|0;
          $841 = 1 << $836;
          $842 = $840 & $841;
          $843 = ($842|0)==(0);
          do {
           if ($843) {
            $844 = $840 | $841;
-           HEAP32[1078] = $844;
+           HEAP32[1034] = $844;
            $$pre$i17$i = ((($839)) + 8|0);
            $$0294$i$i = $839;$$pre$phi$i18$iZ2D = $$pre$i17$i;
           } else {
            $845 = ((($839)) + 8|0);
            $846 = HEAP32[$845>>2]|0;
-           $847 = HEAP32[(4328)>>2]|0;
+           $847 = HEAP32[(4152)>>2]|0;
            $848 = ($847>>>0)>($846>>>0);
            if (!($848)) {
             $$0294$i$i = $846;$$pre$phi$i18$iZ2D = $845;
@@ -11315,20 +8980,20 @@ function _malloc($0) {
           $$0295$i$i = $876;
          }
         } while(0);
-        $877 = (4616 + ($$0295$i$i<<2)|0);
+        $877 = (4440 + ($$0295$i$i<<2)|0);
         $878 = ((($722)) + 28|0);
         HEAP32[$878>>2] = $$0295$i$i;
         $879 = ((($722)) + 16|0);
         $880 = ((($879)) + 4|0);
         HEAP32[$880>>2] = 0;
         HEAP32[$879>>2] = 0;
-        $881 = HEAP32[(4316)>>2]|0;
+        $881 = HEAP32[(4140)>>2]|0;
         $882 = 1 << $$0295$i$i;
         $883 = $881 & $882;
         $884 = ($883|0)==(0);
         if ($884) {
          $885 = $881 | $882;
-         HEAP32[(4316)>>2] = $885;
+         HEAP32[(4140)>>2] = $885;
          HEAP32[$877>>2] = $722;
          $886 = ((($722)) + 24|0);
          HEAP32[$886>>2] = $877;
@@ -11373,7 +9038,7 @@ function _malloc($0) {
             $$028711$i$i = $899;$$028810$i$i = $901;
            }
           }
-          $908 = HEAP32[(4328)>>2]|0;
+          $908 = HEAP32[(4152)>>2]|0;
           $909 = ($908>>>0)>($906>>>0);
           if ($909) {
            _abort();
@@ -11392,7 +9057,7 @@ function _malloc($0) {
         } while(0);
         $913 = ((($$0288$lcssa$i$i)) + 8|0);
         $914 = HEAP32[$913>>2]|0;
-        $915 = HEAP32[(4328)>>2]|0;
+        $915 = HEAP32[(4152)>>2]|0;
         $916 = ($915>>>0)<=($$0288$lcssa$i$i>>>0);
         $917 = ($915>>>0)<=($914>>>0);
         $918 = $917 & $916;
@@ -11418,7 +9083,7 @@ function _malloc($0) {
       STACKTOP = sp;return ($$0|0);
      }
     }
-    $$0$i$i$i = (4760);
+    $$0$i$i$i = (4584);
     while(1) {
      $923 = HEAP32[$$0$i$i$i>>2]|0;
      $924 = ($923>>>0)>($635>>>0);
@@ -11459,23 +9124,23 @@ function _malloc($0) {
     $952 = $949 ? 0 : $951;
     $953 = (($$748$i) + ($952)|0);
     $954 = (($945) - ($952))|0;
-    HEAP32[(4336)>>2] = $953;
-    HEAP32[(4324)>>2] = $954;
+    HEAP32[(4160)>>2] = $953;
+    HEAP32[(4148)>>2] = $954;
     $955 = $954 | 1;
     $956 = ((($953)) + 4|0);
     HEAP32[$956>>2] = $955;
     $957 = (($$748$i) + ($945)|0);
     $958 = ((($957)) + 4|0);
     HEAP32[$958>>2] = 40;
-    $959 = HEAP32[(4800)>>2]|0;
-    HEAP32[(4340)>>2] = $959;
+    $959 = HEAP32[(4624)>>2]|0;
+    HEAP32[(4164)>>2] = $959;
     $960 = ((($942)) + 4|0);
     HEAP32[$960>>2] = 27;
-    ;HEAP32[$943>>2]=HEAP32[(4760)>>2]|0;HEAP32[$943+4>>2]=HEAP32[(4760)+4>>2]|0;HEAP32[$943+8>>2]=HEAP32[(4760)+8>>2]|0;HEAP32[$943+12>>2]=HEAP32[(4760)+12>>2]|0;
-    HEAP32[(4760)>>2] = $$748$i;
-    HEAP32[(4764)>>2] = $$723947$i;
-    HEAP32[(4772)>>2] = 0;
-    HEAP32[(4768)>>2] = $943;
+    ;HEAP32[$943>>2]=HEAP32[(4584)>>2]|0;HEAP32[$943+4>>2]=HEAP32[(4584)+4>>2]|0;HEAP32[$943+8>>2]=HEAP32[(4584)+8>>2]|0;HEAP32[$943+12>>2]=HEAP32[(4584)+12>>2]|0;
+    HEAP32[(4584)>>2] = $$748$i;
+    HEAP32[(4588)>>2] = $$723947$i;
+    HEAP32[(4596)>>2] = 0;
+    HEAP32[(4592)>>2] = $943;
     $962 = $944;
     while(1) {
      $961 = ((($962)) + 4|0);
@@ -11504,20 +9169,20 @@ function _malloc($0) {
      $974 = ($968>>>0)<(256);
      if ($974) {
       $975 = $973 << 1;
-      $976 = (4352 + ($975<<2)|0);
-      $977 = HEAP32[1078]|0;
+      $976 = (4176 + ($975<<2)|0);
+      $977 = HEAP32[1034]|0;
       $978 = 1 << $973;
       $979 = $977 & $978;
       $980 = ($979|0)==(0);
       if ($980) {
        $981 = $977 | $978;
-       HEAP32[1078] = $981;
+       HEAP32[1034] = $981;
        $$pre$i$i = ((($976)) + 8|0);
        $$0211$i$i = $976;$$pre$phi$i$iZ2D = $$pre$i$i;
       } else {
        $982 = ((($976)) + 8|0);
        $983 = HEAP32[$982>>2]|0;
-       $984 = HEAP32[(4328)>>2]|0;
+       $984 = HEAP32[(4152)>>2]|0;
        $985 = ($984>>>0)>($983>>>0);
        if ($985) {
         _abort();
@@ -11569,19 +9234,19 @@ function _malloc($0) {
        $$0212$i$i = $1013;
       }
      }
-     $1014 = (4616 + ($$0212$i$i<<2)|0);
+     $1014 = (4440 + ($$0212$i$i<<2)|0);
      $1015 = ((($635)) + 28|0);
      HEAP32[$1015>>2] = $$0212$i$i;
      $1016 = ((($635)) + 20|0);
      HEAP32[$1016>>2] = 0;
      HEAP32[$940>>2] = 0;
-     $1017 = HEAP32[(4316)>>2]|0;
+     $1017 = HEAP32[(4140)>>2]|0;
      $1018 = 1 << $$0212$i$i;
      $1019 = $1017 & $1018;
      $1020 = ($1019|0)==(0);
      if ($1020) {
       $1021 = $1017 | $1018;
-      HEAP32[(4316)>>2] = $1021;
+      HEAP32[(4140)>>2] = $1021;
       HEAP32[$1014>>2] = $635;
       $1022 = ((($635)) + 24|0);
       HEAP32[$1022>>2] = $1014;
@@ -11626,7 +9291,7 @@ function _malloc($0) {
          $$02065$i$i = $1035;$$02074$i$i = $1037;
         }
        }
-       $1044 = HEAP32[(4328)>>2]|0;
+       $1044 = HEAP32[(4152)>>2]|0;
        $1045 = ($1044>>>0)>($1042>>>0);
        if ($1045) {
         _abort();
@@ -11645,7 +9310,7 @@ function _malloc($0) {
      } while(0);
      $1049 = ((($$0207$lcssa$i$i)) + 8|0);
      $1050 = HEAP32[$1049>>2]|0;
-     $1051 = HEAP32[(4328)>>2]|0;
+     $1051 = HEAP32[(4152)>>2]|0;
      $1052 = ($1051>>>0)<=($$0207$lcssa$i$i>>>0);
      $1053 = ($1051>>>0)<=($1050>>>0);
      $1054 = $1053 & $1052;
@@ -11667,14 +9332,14 @@ function _malloc($0) {
     }
    }
   } while(0);
-  $1060 = HEAP32[(4324)>>2]|0;
+  $1060 = HEAP32[(4148)>>2]|0;
   $1061 = ($1060>>>0)>($$0197>>>0);
   if ($1061) {
    $1062 = (($1060) - ($$0197))|0;
-   HEAP32[(4324)>>2] = $1062;
-   $1063 = HEAP32[(4336)>>2]|0;
+   HEAP32[(4148)>>2] = $1062;
+   $1063 = HEAP32[(4160)>>2]|0;
    $1064 = (($1063) + ($$0197)|0);
-   HEAP32[(4336)>>2] = $1064;
+   HEAP32[(4160)>>2] = $1064;
    $1065 = $1062 | 1;
    $1066 = ((($1064)) + 4|0);
    HEAP32[$1066>>2] = $1065;
@@ -11718,7 +9383,7 @@ function _free($0) {
   return;
  }
  $2 = ((($0)) + -8|0);
- $3 = HEAP32[(4328)>>2]|0;
+ $3 = HEAP32[(4152)>>2]|0;
  $4 = ($2>>>0)<($3>>>0);
  if ($4) {
   _abort();
@@ -11751,7 +9416,7 @@ function _free($0) {
     _abort();
     // unreachable;
    }
-   $19 = HEAP32[(4332)>>2]|0;
+   $19 = HEAP32[(4156)>>2]|0;
    $20 = ($19|0)==($16|0);
    if ($20) {
     $105 = ((($10)) + 4|0);
@@ -11766,7 +9431,7 @@ function _free($0) {
     $110 = ((($16)) + 4|0);
     $111 = $17 | 1;
     $112 = $106 & -2;
-    HEAP32[(4320)>>2] = $17;
+    HEAP32[(4144)>>2] = $17;
     HEAP32[$105>>2] = $112;
     HEAP32[$110>>2] = $111;
     HEAP32[$109>>2] = $17;
@@ -11780,7 +9445,7 @@ function _free($0) {
     $25 = ((($16)) + 12|0);
     $26 = HEAP32[$25>>2]|0;
     $27 = $21 << 1;
-    $28 = (4352 + ($27<<2)|0);
+    $28 = (4176 + ($27<<2)|0);
     $29 = ($24|0)==($28|0);
     if (!($29)) {
      $30 = ($3>>>0)>($24>>>0);
@@ -11800,9 +9465,9 @@ function _free($0) {
     if ($34) {
      $35 = 1 << $21;
      $36 = $35 ^ -1;
-     $37 = HEAP32[1078]|0;
+     $37 = HEAP32[1034]|0;
      $38 = $37 & $36;
-     HEAP32[1078] = $38;
+     HEAP32[1034] = $38;
      $$1 = $16;$$1380 = $17;$113 = $16;
      break;
     }
@@ -11918,7 +9583,7 @@ function _free($0) {
    } else {
     $73 = ((($16)) + 28|0);
     $74 = HEAP32[$73>>2]|0;
-    $75 = (4616 + ($74<<2)|0);
+    $75 = (4440 + ($74<<2)|0);
     $76 = HEAP32[$75>>2]|0;
     $77 = ($76|0)==($16|0);
     do {
@@ -11928,14 +9593,14 @@ function _free($0) {
       if ($cond419) {
        $78 = 1 << $74;
        $79 = $78 ^ -1;
-       $80 = HEAP32[(4316)>>2]|0;
+       $80 = HEAP32[(4140)>>2]|0;
        $81 = $80 & $79;
-       HEAP32[(4316)>>2] = $81;
+       HEAP32[(4140)>>2] = $81;
        $$1 = $16;$$1380 = $17;$113 = $16;
        break L10;
       }
      } else {
-      $82 = HEAP32[(4328)>>2]|0;
+      $82 = HEAP32[(4152)>>2]|0;
       $83 = ($82>>>0)>($46>>>0);
       if ($83) {
        _abort();
@@ -11957,7 +9622,7 @@ function _free($0) {
       }
      }
     } while(0);
-    $89 = HEAP32[(4328)>>2]|0;
+    $89 = HEAP32[(4152)>>2]|0;
     $90 = ($89>>>0)>($$3>>>0);
     if ($90) {
      _abort();
@@ -11989,7 +9654,7 @@ function _free($0) {
     if ($100) {
      $$1 = $16;$$1380 = $17;$113 = $16;
     } else {
-     $101 = HEAP32[(4328)>>2]|0;
+     $101 = HEAP32[(4152)>>2]|0;
      $102 = ($101>>>0)>($99>>>0);
      if ($102) {
       _abort();
@@ -12024,32 +9689,32 @@ function _free($0) {
  $119 = $116 & 2;
  $120 = ($119|0)==(0);
  if ($120) {
-  $121 = HEAP32[(4336)>>2]|0;
+  $121 = HEAP32[(4160)>>2]|0;
   $122 = ($121|0)==($10|0);
   if ($122) {
-   $123 = HEAP32[(4324)>>2]|0;
+   $123 = HEAP32[(4148)>>2]|0;
    $124 = (($123) + ($$1380))|0;
-   HEAP32[(4324)>>2] = $124;
-   HEAP32[(4336)>>2] = $$1;
+   HEAP32[(4148)>>2] = $124;
+   HEAP32[(4160)>>2] = $$1;
    $125 = $124 | 1;
    $126 = ((($$1)) + 4|0);
    HEAP32[$126>>2] = $125;
-   $127 = HEAP32[(4332)>>2]|0;
+   $127 = HEAP32[(4156)>>2]|0;
    $128 = ($$1|0)==($127|0);
    if (!($128)) {
     return;
    }
-   HEAP32[(4332)>>2] = 0;
-   HEAP32[(4320)>>2] = 0;
+   HEAP32[(4156)>>2] = 0;
+   HEAP32[(4144)>>2] = 0;
    return;
   }
-  $129 = HEAP32[(4332)>>2]|0;
+  $129 = HEAP32[(4156)>>2]|0;
   $130 = ($129|0)==($10|0);
   if ($130) {
-   $131 = HEAP32[(4320)>>2]|0;
+   $131 = HEAP32[(4144)>>2]|0;
    $132 = (($131) + ($$1380))|0;
-   HEAP32[(4320)>>2] = $132;
-   HEAP32[(4332)>>2] = $113;
+   HEAP32[(4144)>>2] = $132;
+   HEAP32[(4156)>>2] = $113;
    $133 = $132 | 1;
    $134 = ((($$1)) + 4|0);
    HEAP32[$134>>2] = $133;
@@ -12068,10 +9733,10 @@ function _free($0) {
     $142 = ((($10)) + 12|0);
     $143 = HEAP32[$142>>2]|0;
     $144 = $138 << 1;
-    $145 = (4352 + ($144<<2)|0);
+    $145 = (4176 + ($144<<2)|0);
     $146 = ($141|0)==($145|0);
     if (!($146)) {
-     $147 = HEAP32[(4328)>>2]|0;
+     $147 = HEAP32[(4152)>>2]|0;
      $148 = ($147>>>0)>($141>>>0);
      if ($148) {
       _abort();
@@ -12089,9 +9754,9 @@ function _free($0) {
     if ($152) {
      $153 = 1 << $138;
      $154 = $153 ^ -1;
-     $155 = HEAP32[1078]|0;
+     $155 = HEAP32[1034]|0;
      $156 = $155 & $154;
-     HEAP32[1078] = $156;
+     HEAP32[1034] = $156;
      break;
     }
     $157 = ($143|0)==($145|0);
@@ -12099,7 +9764,7 @@ function _free($0) {
      $$pre443 = ((($143)) + 8|0);
      $$pre$phi444Z2D = $$pre443;
     } else {
-     $158 = HEAP32[(4328)>>2]|0;
+     $158 = HEAP32[(4152)>>2]|0;
      $159 = ($158>>>0)>($143>>>0);
      if ($159) {
       _abort();
@@ -12161,7 +9826,7 @@ function _free($0) {
        }
        $$1396 = $$1396$be;$$1400 = $$1400$be;
       }
-      $191 = HEAP32[(4328)>>2]|0;
+      $191 = HEAP32[(4152)>>2]|0;
       $192 = ($191>>>0)>($$1400>>>0);
       if ($192) {
        _abort();
@@ -12174,7 +9839,7 @@ function _free($0) {
      } else {
       $169 = ((($10)) + 8|0);
       $170 = HEAP32[$169>>2]|0;
-      $171 = HEAP32[(4328)>>2]|0;
+      $171 = HEAP32[(4152)>>2]|0;
       $172 = ($171>>>0)>($170>>>0);
       if ($172) {
        _abort();
@@ -12205,7 +9870,7 @@ function _free($0) {
     if (!($193)) {
      $194 = ((($10)) + 28|0);
      $195 = HEAP32[$194>>2]|0;
-     $196 = (4616 + ($195<<2)|0);
+     $196 = (4440 + ($195<<2)|0);
      $197 = HEAP32[$196>>2]|0;
      $198 = ($197|0)==($10|0);
      do {
@@ -12215,13 +9880,13 @@ function _free($0) {
        if ($cond420) {
         $199 = 1 << $195;
         $200 = $199 ^ -1;
-        $201 = HEAP32[(4316)>>2]|0;
+        $201 = HEAP32[(4140)>>2]|0;
         $202 = $201 & $200;
-        HEAP32[(4316)>>2] = $202;
+        HEAP32[(4140)>>2] = $202;
         break L111;
        }
       } else {
-       $203 = HEAP32[(4328)>>2]|0;
+       $203 = HEAP32[(4152)>>2]|0;
        $204 = ($203>>>0)>($165>>>0);
        if ($204) {
         _abort();
@@ -12242,7 +9907,7 @@ function _free($0) {
        }
       }
      } while(0);
-     $210 = HEAP32[(4328)>>2]|0;
+     $210 = HEAP32[(4152)>>2]|0;
      $211 = ($210>>>0)>($$3398>>>0);
      if ($211) {
       _abort();
@@ -12272,7 +9937,7 @@ function _free($0) {
      $220 = HEAP32[$219>>2]|0;
      $221 = ($220|0)==(0|0);
      if (!($221)) {
-      $222 = HEAP32[(4328)>>2]|0;
+      $222 = HEAP32[(4152)>>2]|0;
       $223 = ($222>>>0)>($220>>>0);
       if ($223) {
        _abort();
@@ -12293,10 +9958,10 @@ function _free($0) {
   HEAP32[$227>>2] = $226;
   $228 = (($113) + ($137)|0);
   HEAP32[$228>>2] = $137;
-  $229 = HEAP32[(4332)>>2]|0;
+  $229 = HEAP32[(4156)>>2]|0;
   $230 = ($$1|0)==($229|0);
   if ($230) {
-   HEAP32[(4320)>>2] = $137;
+   HEAP32[(4144)>>2] = $137;
    return;
   } else {
    $$2 = $137;
@@ -12315,20 +9980,20 @@ function _free($0) {
  $236 = ($$2>>>0)<(256);
  if ($236) {
   $237 = $235 << 1;
-  $238 = (4352 + ($237<<2)|0);
-  $239 = HEAP32[1078]|0;
+  $238 = (4176 + ($237<<2)|0);
+  $239 = HEAP32[1034]|0;
   $240 = 1 << $235;
   $241 = $239 & $240;
   $242 = ($241|0)==(0);
   if ($242) {
    $243 = $239 | $240;
-   HEAP32[1078] = $243;
+   HEAP32[1034] = $243;
    $$pre = ((($238)) + 8|0);
    $$0401 = $238;$$pre$phiZ2D = $$pre;
   } else {
    $244 = ((($238)) + 8|0);
    $245 = HEAP32[$244>>2]|0;
-   $246 = HEAP32[(4328)>>2]|0;
+   $246 = HEAP32[(4152)>>2]|0;
    $247 = ($246>>>0)>($245>>>0);
    if ($247) {
     _abort();
@@ -12380,21 +10045,21 @@ function _free($0) {
    $$0394 = $275;
   }
  }
- $276 = (4616 + ($$0394<<2)|0);
+ $276 = (4440 + ($$0394<<2)|0);
  $277 = ((($$1)) + 28|0);
  HEAP32[$277>>2] = $$0394;
  $278 = ((($$1)) + 16|0);
  $279 = ((($$1)) + 20|0);
  HEAP32[$279>>2] = 0;
  HEAP32[$278>>2] = 0;
- $280 = HEAP32[(4316)>>2]|0;
+ $280 = HEAP32[(4140)>>2]|0;
  $281 = 1 << $$0394;
  $282 = $280 & $281;
  $283 = ($282|0)==(0);
  L197: do {
   if ($283) {
    $284 = $280 | $281;
-   HEAP32[(4316)>>2] = $284;
+   HEAP32[(4140)>>2] = $284;
    HEAP32[$276>>2] = $$1;
    $285 = ((($$1)) + 24|0);
    HEAP32[$285>>2] = $276;
@@ -12438,7 +10103,7 @@ function _free($0) {
        $$0381438 = $298;$$0382437 = $300;
       }
      }
-     $307 = HEAP32[(4328)>>2]|0;
+     $307 = HEAP32[(4152)>>2]|0;
      $308 = ($307>>>0)>($305>>>0);
      if ($308) {
       _abort();
@@ -12457,7 +10122,7 @@ function _free($0) {
    } while(0);
    $312 = ((($$0382$lcssa)) + 8|0);
    $313 = HEAP32[$312>>2]|0;
-   $314 = HEAP32[(4328)>>2]|0;
+   $314 = HEAP32[(4152)>>2]|0;
    $315 = ($314>>>0)<=($$0382$lcssa>>>0);
    $316 = ($314>>>0)<=($313>>>0);
    $317 = $316 & $315;
@@ -12478,14 +10143,14 @@ function _free($0) {
    }
   }
  } while(0);
- $322 = HEAP32[(4344)>>2]|0;
+ $322 = HEAP32[(4168)>>2]|0;
  $323 = (($322) + -1)|0;
- HEAP32[(4344)>>2] = $323;
+ HEAP32[(4168)>>2] = $323;
  $324 = ($323|0)==(0);
  if (!($324)) {
   return;
  }
- $$0211$in$i = (4768);
+ $$0211$in$i = (4592);
  while(1) {
   $$0211$i = HEAP32[$$0211$in$i>>2]|0;
   $325 = ($$0211$i|0)==(0|0);
@@ -12496,7 +10161,7 @@ function _free($0) {
    $$0211$in$i = $326;
   }
  }
- HEAP32[(4344)>>2] = -1;
+ HEAP32[(4168)>>2] = -1;
  return;
 }
 function ___stdio_close($0) {
@@ -12523,9 +10188,9 @@ function ___stdio_write($0,$1,$2) {
  var $vararg_ptr6 = 0, $vararg_ptr7 = 0, label = 0, sp = 0;
  sp = STACKTOP;
  STACKTOP = STACKTOP + 48|0; if ((STACKTOP|0) >= (STACK_MAX|0)) abortStackOverflow(48|0);
- $vararg_buffer3 = sp + 16|0;
- $vararg_buffer = sp;
- $3 = sp + 32|0;
+ $vararg_buffer3 = sp + 32|0;
+ $vararg_buffer = sp + 16|0;
+ $3 = sp;
  $4 = ((($0)) + 28|0);
  $5 = HEAP32[$4>>2]|0;
  HEAP32[$3>>2] = $5;
@@ -12678,7 +10343,7 @@ function ___syscall_ret($0) {
 function ___errno_location() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- return (4808|0);
+ return (4632|0);
 }
 function _dummy_569($0) {
  $0 = $0|0;
@@ -12825,13 +10490,13 @@ function ___strdup($0) {
 function ___ofl_lock() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- ___lock((4812|0));
- return (4820|0);
+ ___lock((4636|0));
+ return (4644|0);
 }
 function ___ofl_unlock() {
  var label = 0, sp = 0;
  sp = STACKTOP;
- ___unlock((4812|0));
+ ___unlock((4636|0));
  return;
 }
 function _fflush($0) {
@@ -12842,12 +10507,12 @@ function _fflush($0) {
  $1 = ($0|0)==(0|0);
  do {
   if ($1) {
-   $8 = HEAP32[171]|0;
+   $8 = HEAP32[176]|0;
    $9 = ($8|0)==(0|0);
    if ($9) {
     $29 = 0;
    } else {
-    $10 = HEAP32[171]|0;
+    $10 = HEAP32[176]|0;
     $11 = (_fflush($10)|0);
     $29 = $11;
    }
@@ -12967,7 +10632,7 @@ function ___fflush_unlocked($0) {
  }
  return ($$0|0);
 }
-function __Znwj($0) {
+function __Znwm($0) {
  $0 = $0|0;
  var $$lcssa = 0, $1 = 0, $2 = 0, $3 = 0, $4 = 0, $5 = 0, $spec$store$select = 0, label = 0, sp = 0;
  sp = STACKTOP;
@@ -13040,7 +10705,7 @@ function __ZNK10__cxxabiv117__class_type_info9can_catchEPKNS_16__shim_type_infoE
   if ($5) {
    $$2 = 0;
   } else {
-   $6 = (___dynamic_cast($1,248,232,0)|0);
+   $6 = (___dynamic_cast($1,352,336,0)|0);
    $7 = ($6|0)==(0|0);
    if ($7) {
     $$2 = 0;
@@ -13630,7 +11295,7 @@ function __ZNK10__cxxabiv119__pointer_type_info9can_catchEPKNS_16__shim_type_inf
   if ($7) {
    $$4 = 0;
   } else {
-   $8 = (___dynamic_cast($1,248,304,0)|0);
+   $8 = (___dynamic_cast($1,352,408,0)|0);
    $9 = ($8|0)==(0|0);
    if ($9) {
     $$4 = 0;
@@ -13652,7 +11317,7 @@ function __ZNK10__cxxabiv119__pointer_type_info9can_catchEPKNS_16__shim_type_inf
       $$4 = 1;
      } else {
       $22 = HEAP32[$17>>2]|0;
-      $23 = (__ZN10__cxxabiv18is_equalEPKSt9type_infoS2_b($22,336,0)|0);
+      $23 = (__ZN10__cxxabiv18is_equalEPKSt9type_infoS2_b($22,440,0)|0);
       if ($23) {
        $$4 = 1;
       } else {
@@ -13661,7 +11326,7 @@ function __ZNK10__cxxabiv119__pointer_type_info9can_catchEPKNS_16__shim_type_inf
        if ($25) {
         $$4 = 0;
        } else {
-        $26 = (___dynamic_cast($24,248,232,0)|0);
+        $26 = (___dynamic_cast($24,352,336,0)|0);
         $27 = ($26|0)==(0|0);
         if ($27) {
          $$4 = 0;
@@ -13671,7 +11336,7 @@ function __ZNK10__cxxabiv119__pointer_type_info9can_catchEPKNS_16__shim_type_inf
          if ($29) {
           $$4 = 0;
          } else {
-          $30 = (___dynamic_cast($28,248,232,0)|0);
+          $30 = (___dynamic_cast($28,352,336,0)|0);
           $31 = ($30|0)==(0|0);
           if ($31) {
            $$4 = 0;
@@ -13726,7 +11391,7 @@ function __ZNK10__cxxabiv117__pbase_type_info9can_catchEPKNS_16__shim_type_infoE
  if ($3) {
   $$0 = 1;
  } else {
-  $4 = (__ZN10__cxxabiv18is_equalEPKSt9type_infoS2_b($1,344,0)|0);
+  $4 = (__ZN10__cxxabiv18is_equalEPKSt9type_infoS2_b($1,448,0)|0);
   $$0 = $4;
  }
  return ($$0|0);
@@ -14214,9 +11879,9 @@ function __ZNK10__cxxabiv122__base_class_type_info16search_below_dstEPNS_19__dyn
 function __ZSt15get_new_handlerv() {
  var $0 = 0, $1 = 0, $2 = 0, label = 0, sp = 0;
  sp = STACKTOP;
- $0 = HEAP32[1206]|0;
+ $0 = HEAP32[1162]|0;
  $1 = (($0) + 0)|0;
- HEAP32[1206] = $1;
+ HEAP32[1162] = $1;
  $2 = $0;
  return ($2|0);
 }
@@ -14384,17 +12049,17 @@ function dynCall_ii(index,a1) {
 }
 
 
-function dynCall_iidiidddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12) {
+function dynCall_iidiiddddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13) {
   index = index|0;
-  a1=a1|0; a2=+a2; a3=a3|0; a4=a4|0; a5=+a5; a6=+a6; a7=+a7; a8=+a8; a9=+a9; a10=+a10; a11=+a11; a12=+a12;
-  return FUNCTION_TABLE_iidiidddddddd[index&63](a1|0,+a2,a3|0,a4|0,+a5,+a6,+a7,+a8,+a9,+a10,+a11,+a12)|0;
+  a1=a1|0; a2=+a2; a3=a3|0; a4=a4|0; a5=+a5; a6=+a6; a7=+a7; a8=+a8; a9=+a9; a10=+a10; a11=+a11; a12=+a12; a13=+a13;
+  return FUNCTION_TABLE_iidiiddddddddd[index&63](a1|0,+a2,a3|0,a4|0,+a5,+a6,+a7,+a8,+a9,+a10,+a11,+a12,+a13)|0;
 }
 
 
-function dynCall_iiidiidddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13) {
+function dynCall_iiidiiddddddddd(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14) {
   index = index|0;
-  a1=a1|0; a2=a2|0; a3=+a3; a4=a4|0; a5=a5|0; a6=+a6; a7=+a7; a8=+a8; a9=+a9; a10=+a10; a11=+a11; a12=+a12; a13=+a13;
-  return FUNCTION_TABLE_iiidiidddddddd[index&63](a1|0,a2|0,+a3,a4|0,a5|0,+a6,+a7,+a8,+a9,+a10,+a11,+a12,+a13)|0;
+  a1=a1|0; a2=a2|0; a3=+a3; a4=a4|0; a5=a5|0; a6=+a6; a7=+a7; a8=+a8; a9=+a9; a10=+a10; a11=+a11; a12=+a12; a13=+a13; a14=+a14;
+  return FUNCTION_TABLE_iiidiiddddddddd[index&63](a1|0,a2|0,+a3,a4|0,a5|0,+a6,+a7,+a8,+a9,+a10,+a11,+a12,+a13,+a14)|0;
 }
 
 
@@ -14466,11 +12131,11 @@ function b0() {
 function b1(p0) {
  p0 = p0|0; nullFunc_ii(1);return 0;
 }
-function b2(p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11) {
- p0 = p0|0;p1 = +p1;p2 = p2|0;p3 = p3|0;p4 = +p4;p5 = +p5;p6 = +p6;p7 = +p7;p8 = +p8;p9 = +p9;p10 = +p10;p11 = +p11; nullFunc_iidiidddddddd(2);return 0;
+function b2(p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12) {
+ p0 = p0|0;p1 = +p1;p2 = p2|0;p3 = p3|0;p4 = +p4;p5 = +p5;p6 = +p6;p7 = +p7;p8 = +p8;p9 = +p9;p10 = +p10;p11 = +p11;p12 = +p12; nullFunc_iidiiddddddddd(2);return 0;
 }
-function b3(p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12) {
- p0 = p0|0;p1 = p1|0;p2 = +p2;p3 = p3|0;p4 = p4|0;p5 = +p5;p6 = +p6;p7 = +p7;p8 = +p8;p9 = +p9;p10 = +p10;p11 = +p11;p12 = +p12; nullFunc_iiidiidddddddd(3);return 0;
+function b3(p0,p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12,p13) {
+ p0 = p0|0;p1 = p1|0;p2 = +p2;p3 = p3|0;p4 = p4|0;p5 = +p5;p6 = +p6;p7 = +p7;p8 = +p8;p9 = +p9;p10 = +p10;p11 = +p11;p12 = +p12;p13 = +p13; nullFunc_iiidiiddddddddd(3);return 0;
 }
 function b4(p0,p1,p2) {
  p0 = p0|0;p1 = p1|0;p2 = p2|0; nullFunc_iiii(4);return 0;
@@ -14505,11 +12170,11 @@ var FUNCTION_TABLE_i = [b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0,b0
 ,b0,b0,b0];
 var FUNCTION_TABLE_ii = [b1,___stdio_close,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,b1,__ZN10emscripten8internal13getActualTypeI10NstrumentaEEPKvPT_,b1,b1,__ZN10emscripten8internal7InvokerIP10NstrumentaJEE6invokeEPFS3_vE,b1
 ,b1,b1,b1];
-var FUNCTION_TABLE_iidiidddddddd = [b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2
-,b2,b2,b2,__ZN10Nstrumenta11ReportEventEdjidddddddd,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2
+var FUNCTION_TABLE_iidiiddddddddd = [b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2
+,b2,b2,b2,__ZN10Nstrumenta11ReportEventEdjiddddddddd,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2,b2
 ,b2,b2,b2,b2,b2];
-var FUNCTION_TABLE_iiidiidddddddd = [b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3
-,b3,b3,b3,b3,__ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjiddddddddEiPS2_JdjiddddddddEE6invokeERKS4_S5_djidddddddd,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3
+var FUNCTION_TABLE_iiidiiddddddddd = [b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3
+,b3,b3,b3,b3,__ZN10emscripten8internal13MethodInvokerIM10NstrumentaFidjidddddddddEiPS2_JdjidddddddddEE6invokeERKS4_S5_djiddddddddd,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3,b3
 ,b3,b3,b3,b3,b3];
 var FUNCTION_TABLE_iiii = [b4,b4,___stdout_write,___stdio_seek,b4,b4,b4,b4,__ZNK10__cxxabiv117__class_type_info9can_catchEPKNS_16__shim_type_infoERPv,b4,b4,b4,b4,b4,b4,b4,b4,__ZNK10__cxxabiv123__fundamental_type_info9can_catchEPKNS_16__shim_type_infoERPv,b4,__ZNK10__cxxabiv119__pointer_type_info9can_catchEPKNS_16__shim_type_infoERPv,b4,b4,b4,b4,b4,b4,b4,b4,b4
 ,b4,b4,b4,b4,b4,___stdio_write,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4,b4
@@ -14530,7 +12195,7 @@ var FUNCTION_TABLE_viiiii = [b11,b11,b11,b11,b11,b11,b11,b11,b11,b11,__ZNK10__cx
 var FUNCTION_TABLE_viiiiii = [b12,b12,b12,b12,b12,b12,b12,b12,b12,__ZNK10__cxxabiv117__class_type_info16search_above_dstEPNS_19__dynamic_cast_infoEPKvS4_ib,b12,b12,b12,__ZNK10__cxxabiv120__si_class_type_info16search_above_dstEPNS_19__dynamic_cast_infoEPKvS4_ib,b12,b12,b12,b12,b12,b12,b12,__ZNK10__cxxabiv121__vmi_class_type_info16search_above_dstEPNS_19__dynamic_cast_infoEPKvS4_ib,b12,b12,b12,b12,b12,b12,b12
 ,b12,b12,b12];
 
-  return { __GLOBAL__sub_I_bind_cpp: __GLOBAL__sub_I_bind_cpp, __GLOBAL__sub_I_nstrumenta_cpp: __GLOBAL__sub_I_nstrumenta_cpp, ___errno_location: ___errno_location, ___getTypeName: ___getTypeName, _fflush: _fflush, _free: _free, _malloc: _malloc, _memcpy: _memcpy, _memset: _memset, _sbrk: _sbrk, dynCall_i: dynCall_i, dynCall_ii: dynCall_ii, dynCall_iidiidddddddd: dynCall_iidiidddddddd, dynCall_iiidiidddddddd: dynCall_iiidiidddddddd, dynCall_iiii: dynCall_iiii, dynCall_v: dynCall_v, dynCall_vi: dynCall_vi, dynCall_vii: dynCall_vii, dynCall_viid: dynCall_viid, dynCall_viiid: dynCall_viiid, dynCall_viiii: dynCall_viiii, dynCall_viiiii: dynCall_viiiii, dynCall_viiiiii: dynCall_viiiiii, establishStackSpace: establishStackSpace, getTempRet0: getTempRet0, runPostSets: runPostSets, setTempRet0: setTempRet0, setThrew: setThrew, stackAlloc: stackAlloc, stackRestore: stackRestore, stackSave: stackSave };
+  return { __GLOBAL__sub_I_bind_cpp: __GLOBAL__sub_I_bind_cpp, __GLOBAL__sub_I_nstrumenta_cpp: __GLOBAL__sub_I_nstrumenta_cpp, ___errno_location: ___errno_location, ___getTypeName: ___getTypeName, _fflush: _fflush, _free: _free, _malloc: _malloc, _memcpy: _memcpy, _memset: _memset, _sbrk: _sbrk, dynCall_i: dynCall_i, dynCall_ii: dynCall_ii, dynCall_iidiiddddddddd: dynCall_iidiiddddddddd, dynCall_iiidiiddddddddd: dynCall_iiidiiddddddddd, dynCall_iiii: dynCall_iiii, dynCall_v: dynCall_v, dynCall_vi: dynCall_vi, dynCall_vii: dynCall_vii, dynCall_viid: dynCall_viid, dynCall_viiid: dynCall_viiid, dynCall_viiii: dynCall_viiii, dynCall_viiiii: dynCall_viiiii, dynCall_viiiiii: dynCall_viiiiii, establishStackSpace: establishStackSpace, getTempRet0: getTempRet0, runPostSets: runPostSets, setTempRet0: setTempRet0, setThrew: setThrew, stackAlloc: stackAlloc, stackRestore: stackRestore, stackSave: stackSave };
 })
 // EMSCRIPTEN_END_ASM
 (Module.asmGlobalArg, Module.asmLibraryArg, buffer);
@@ -14644,8 +12309,8 @@ var stackRestore = Module["stackRestore"] = asm["stackRestore"];
 var stackSave = Module["stackSave"] = asm["stackSave"];
 var dynCall_i = Module["dynCall_i"] = asm["dynCall_i"];
 var dynCall_ii = Module["dynCall_ii"] = asm["dynCall_ii"];
-var dynCall_iidiidddddddd = Module["dynCall_iidiidddddddd"] = asm["dynCall_iidiidddddddd"];
-var dynCall_iiidiidddddddd = Module["dynCall_iiidiidddddddd"] = asm["dynCall_iiidiidddddddd"];
+var dynCall_iidiiddddddddd = Module["dynCall_iidiiddddddddd"] = asm["dynCall_iidiiddddddddd"];
+var dynCall_iiidiiddddddddd = Module["dynCall_iiidiiddddddddd"] = asm["dynCall_iiidiiddddddddd"];
 var dynCall_iiii = Module["dynCall_iiii"] = asm["dynCall_iiii"];
 var dynCall_v = Module["dynCall_v"] = asm["dynCall_v"];
 var dynCall_vi = Module["dynCall_vi"] = asm["dynCall_vi"];
@@ -14697,6 +12362,7 @@ if (!Module["writeArrayToMemory"]) Module["writeArrayToMemory"] = function() { a
 if (!Module["writeAsciiToMemory"]) Module["writeAsciiToMemory"] = function() { abort("'writeAsciiToMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Module["addRunDependency"]) Module["addRunDependency"] = function() { abort("'addRunDependency' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Module["removeRunDependency"]) Module["removeRunDependency"] = function() { abort("'removeRunDependency' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
+if (!Module["ENV"]) Module["ENV"] = function() { abort("'ENV' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Module["FS"]) Module["FS"] = function() { abort("'FS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Module["FS_createFolder"]) Module["FS_createFolder"] = function() { abort("'FS_createFolder' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Module["FS_createPath"]) Module["FS_createPath"] = function() { abort("'FS_createPath' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
@@ -14736,11 +12402,7 @@ if (!Module["ALLOC_NONE"]) Object.defineProperty(Module, "ALLOC_NONE", { get: fu
 
 if (memoryInitializer) {
   if (!isDataURI(memoryInitializer)) {
-    if (typeof Module['locateFile'] === 'function') {
-      memoryInitializer = Module['locateFile'](memoryInitializer);
-    } else if (Module['memoryInitializerPrefixURL']) {
-      memoryInitializer = Module['memoryInitializerPrefixURL'] + memoryInitializer;
-    }
+    memoryInitializer = locateFile(memoryInitializer);
   }
   if (ENVIRONMENT_IS_NODE || ENVIRONMENT_IS_SHELL) {
     var data = Module['readBinary'](memoryInitializer);
@@ -14770,8 +12432,8 @@ if (memoryInitializer) {
         var request = Module['memoryInitializerRequest'];
         var response = request.response;
         if (request.status !== 200 && request.status !== 0) {
-            // If you see this warning, the issue may be that you are using locateFile or memoryInitializerPrefixURL, and defining them in JS. That
-            // means that the HTML file doesn't know about them, and when it tries to create the mem init request early, does it to the wrong place.
+            // If you see this warning, the issue may be that you are using locateFile and defining it in JS. That
+            // means that the HTML file doesn't know about it, and when it tries to create the mem init request early, does it to the wrong place.
             // Look in your browser's devtools network console to see what's going on.
             console.warn('a problem seems to have happened with Module.memoryInitializerRequest, status: ' + request.status + ', retrying ' + memoryInitializer);
             doBrowserLoad();
@@ -14954,8 +12616,6 @@ function abort(what) {
 }
 Module['abort'] = abort;
 
-// {{PRE_RUN_ADDITIONS}}
-
 if (Module['preInit']) {
   if (typeof Module['preInit'] == 'function') Module['preInit'] = [Module['preInit']];
   while (Module['preInit'].length > 0) {
@@ -14967,8 +12627,6 @@ if (Module['preInit']) {
 Module["noExitRuntime"] = true;
 
 run();
-
-// {{POST_RUN_ADDITIONS}}
 
 
 

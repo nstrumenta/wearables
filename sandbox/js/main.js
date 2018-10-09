@@ -23,8 +23,8 @@ var nst_project = {
             { "id": "imu_data.gyro_scale.x", "name": "gyro scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.y", "name": "gyro scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "imu_data.madgwick_gain", "name": "accel gain", "value": 0.12, "min": 0, "max": 1, "step": 1e-4 },
-            { "id": "imu_data.angularrate_mag", "name": "mag gain", "value": -0.001, "min": -1, "max": 1, "step": 1e-5 }
+            { "id": "imu_data.madgwick_gain", "name": "accel gain", "value": 0.022, "min": 0, "max": 1, "step": 1e-4 },
+            { "id": "imu_data.angularrate_mag", "name": "mag gain", "value": 0.022, "min": -1, "max": 1, "step": 1e-5 }
         ]
 }
 
@@ -232,12 +232,6 @@ var labels = {
         type: 'input',
         traces: ['Vehicle speed (kph)', 'Yaw rate (Degree/Sec)', 'Stering Wheel (Degree)', 'Front Left Wheel Speed (kph)', 'Front Right Wheel Speed (kph)', 'Rear Left Wheel Speed (kph)', 'Rear Right Wheel Speed (kph)']
     },
-
-    65668: {
-        name: 'Applanix',
-        type: 'input',
-        traces: ['latitude', 'longitude', 'altitude', 'roll (degree)', 'pitch (degree)', 'heading (degree)', 'speed (mps)']
-    },
     28: {
         name: 'Fused Location (6DOF)',
         type: 'computed',
@@ -354,65 +348,6 @@ function addEventToPlots(event) {
     }
 }
 
-class AnalysisPlot {
-    constructor(id, data) {
-        this.id = id;
-        this.plotName = this.id;
-        this.data = data;
-
-        try {
-            if (myLayout.getComponent(this.plotName) != null) {
-                console.log('layout component exists')
-            }
-        } catch{
-            console.log('registering layout component');
-            myLayout.registerComponent(this.plotName, function (container, state) {
-                container.getElement().html('<div id="' + state.componentName + '"></div>');
-                container.on('resize', function () {
-                    var update = {
-                        width: container.width,
-                        height: container.height
-                    };
-                    if (document.getElementById(state.componentName) != null) {
-                        try {
-                            Plotly.relayout(state.componentName, update);
-                        } catch (e) {
-                            console.log(e);
-                        }
-                    }
-                });
-
-
-
-            })
-
-
-
-            myLayout.root.contentItems[0].contentItems[1].contentItems[1].addChild({
-                type: 'component',
-                componentName: this.plotName
-            })
-        }
-
-        Plotly.react(this.plotName, this.data, {}, {
-            //             displayModeBar: false
-        });
-    }
-    clearData() {
-        for (var i = 0; i < this.data.length; i++) {
-            this.data[i].x = [];
-            this.data[i].y = [];
-        }
-        //this.update()
-    }
-
-    update() {
-        Plotly.react(this.plotName, this.data, {}, {
-            displayModeBar: false
-        });
-    }
-
-}
 
 class Plot {
     constructor(id, event) {
@@ -491,117 +426,28 @@ class Plot {
 //plotting end
 
 
-
-function setBeaconMarkerPosition(latLng, id) {
-    if (beaconMarkers.hasOwnProperty(id)) {
-        beaconMarkers[id].setPosition(latLng);
-    } else {
-        beaconMarkers[id] = new google.maps.Marker({
-            position: latLng,
-            icon: {
-                strokeColor: 'orange',
-                // colors[id % colors.length],
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 3
-            },
-            clickable: false,
-            map: map
-        });
-    }
-}
-
-function wifiScanEvent(id) {
-    if (beaconMarkers.hasOwnProperty(id)) {
-        beaconMarkers[id].setIcon({
-            strokeColor: 'green',
-            // colors[id % colors.length],
-            path: google.maps.SymbolPath.CIRCLE,
-            scale: 10
-        });
-    } else {
-        console.log('beacon ' + id + ' not found');
-    }
-}
-function dotEvent(timestamp, id) {//console.log('dot ' + id);
-}
-
-var promiseResolve;
-var promiseReject;
-var fminState = {
-    x: []
-};
-
-async function lossAtNextDot(x) {
-    parameters.runCurrentFile({
-        x: x
-    });
-    return new Promise(function (resolve, reject) {
-        promiseResolve = resolve;
-        promiseReject = reject;
-    }
-    );
-}
-
-function setDotMarkerPosition(latLng, id) {
-    if (locationMarkers['js-fused'] != null) {
-        //error report plot
-        var dotError = google.maps.geometry.spherical.computeDistanceBetween(locationMarkers['js-fused'].centerCircle.getPosition(), latLng);
-        parameters.dotError = dotError;
-        console.log('position error:' + dotError);
-    }
-    if (dotMarkers.hasOwnProperty(id)) {
-        dotMarkers[id].setPosition(latLng);
-    } else {
-        dotMarkers[id] = new google.maps.Marker({
-            position: latLng,
-            icon: {
-                strokeColor: colors[id % colors.length],
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 3
-            },
-            clickable: false,
-            map: map
-        });
-    }
-}
-
-var beaconIcon = {
-    path: 'M 16.495278,56.015358 V 61.7 h -29.79035 v -5.684642 c 0,-3.142166 2.664904,-5.684599 5.958047,-5.684599 H -1.37894 V 12.858876 C -4.846738,11.682 -7.337025,8.5620414 -7.337025,4.8537077 c 0,-4.70759139 4.003099,-8.5269628 8.937128,-8.5269628 4.934028,0 8.93709,3.81937141 8.93709,8.5269628 0,3.7083337 -2.501998,6.8282923 -5.958048,8.0051683 v 37.471883 h 5.958048 c 3.293331,0 5.958085,2.542602 5.958085,5.684599 z m -29.639005,-37.094352 2.094658,2.009535 4.224261,-4.019197 -2.106369,-2.009705 c -5.806891,-5.5403776 -5.806891,-14.55586531 0,-20.0960733 l 2.106369,-2.0097051 -4.212738,-4.0190276 -2.106369,2.009705 c -8.134045,7.7497385 -8.134045,20.373541 1.88e-4,28.134468 z m -4.21255,-32.153666 2.106181,-2.009705 -4.212512,-4.019197 -2.106369,2.009662 c -12.777283,12.1908806 -12.777283,32.020462 0,44.211344 l 2.106369,2.009704 4.212512,-4.01924 -2.106331,-2.009662 c -10.461463,-9.970331 -10.461463,-26.2026174 1.5e-4,-36.172906 z m -8.425061,-8.038438 2.106369,-2.009704 -4.212738,-4.019198 -2.106181,2.009705 c -17.420483,16.6209613 -17.420483,43.667384 0,60.299364 l 2.106369,2.009705 4.21255,-4.01924 -2.106369,-2.009705 c -15.104663,-14.4116 -15.104663,-37.8606839 0,-52.260927 z m 37.912909,36.172906 -2.106369,2.009705 4.224261,4.019028 2.09462,-2.009704 c 8.134271,-7.760928 8.134271,-20.3847307 0,-28.1344693 l -2.106369,-2.0095347 -4.212512,4.0192399 2.106369,2.009662 c 5.806664,5.54020796 5.806664,14.5556957 0,20.0960731 z m 12.637611,-32.153708 -2.106369,-2.009662 -4.212549,4.019197 2.106369,2.009705 c 10.449902,9.9702886 10.449902,26.202575 0,36.172906 l -2.106369,2.009493 4.212549,4.01924 2.106369,-2.009706 c 12.777283,-12.190711 12.777283,-32.0202924 0,-44.211173 z m 8.4251,-8.038395 -2.106369,-2.009705 -4.21255,4.019198 2.106369,2.009704 c 15.093102,14.4004123 15.093102,37.838308 0,52.260927 l -2.106369,2.009705 4.21255,4.01924 2.106369,-2.009705 c 17.420294,-16.632193 17.420294,-43.6895913 0,-60.299364 z',
-    strokeWeight: 1,
-    fillColor: '#00A',
-    fillOpacity: 0.5
-};
-function addMarker(event) {
-    // Add a new marker at the new plotted point on the polyline.
-    var marker = new google.maps.Marker({
-        position: event.latLng,
-        clickable: false,
-        map: map
-    });
-}
-
 var keypressListener = new keypress.Listener();
 keypressListener.register_many([{
-    "keys": ".",
+    "keys": "x",
     "on_keydown": function () {
         moveHeadIndex(1);
     }
 }, {
-    "keys": ",",
+    "keys": "z",
     "on_keydown": function () {
         moveHeadIndex(-1);
     }
 }, {
-    "keys": ">",
+    "keys": "X",
     "on_keydown": function () {
-        for (var i = 0; i < 30; i++) {
+        for (var i = 0; i < 50; i++) {
             moveHeadIndex(1);
         }
     }
 }, {
-    "keys": "<",
+    "keys": "Z",
     "on_keydown": function () {
-        for (var i = 0; i < 30; i++) {
+        for (var i = 0; i < 50; i++) {
             moveHeadIndex(-1);
         }
     }
@@ -683,7 +529,6 @@ function accessPointId(inputString) {
     return removeLastByte.toString();
 }
 
-var promiseErrors = [];
 
 function renderOutputEvents() {
     outputEvents.forEach((event) => {
@@ -714,7 +559,7 @@ function renderEvent(id, event) {
 function outputEvent(timestamp, id, accuracy, values0, values1, values2, values3, values4, values5, values6, values7, values8, values9, values10, values11, values12, values13, values14, values15) {
     var eventString = timestamp * 1e-6 + ',' + timestamp + ',' + timestamp + ',' + id + ',' + accuracy + ',' + values0 + ',' + values1 + ',' + values2 + ',' + values3 + ',' + values4 + ',' + values5 + ',' + values6 + ',' + values7 + ',' + values8 + ',' + values9 + ',' + values10 + ',' + values11 + ',' + values12 + ',' + values13 + ',' + values14 + ',' + values15;
     console.log(eventString);
-    renderAlgorithmEvent('js-', eventString);
+    renderAlgorithmEvent('js-', eventString);    
 }
 
 function algorithmEvent(csv) {
@@ -728,129 +573,7 @@ function renderAlgorithmEvent(id, csv) {
         if (csvLines[index].length > 0) {
             var csvSplit = csvLines[index].split(',');
             var timestamp = Number(csvSplit[2]);
-            if (csvSplit[3] == 11) {
-                if (id = "transport-") {
-                    //move the same location marker for dotError in transport
-                    id = "js-";
-                }
-                if (polylines.hasOwnProperty(id + "fused")) {
-                    var q = [0, Number(csvSplit[5 + 1]), Number(csvSplit[5 + 0]), -Number(csvSplit[5 + 2]), Number(csvSplit[5 + 3])];
-                    var heading = (180 / Math.PI) * Math.atan2(2.0 * (q[1] * q[2] + q[3] * q[4]), (q[1] * q[1] - q[2] * q[2] - q[3] * q[3] + q[4] * q[4]));
-                    setLocationMarkerHeading(id + "fused", heading);
-                }
-            }
-            if (csvSplit[3] == 1000) {
-                wifiScanEvent(accessPointId(csvSplit[5]));
-            }
-            if (csvSplit[3] == 1001) {
-                dotEvent(timestamp, Number(csvSplit[5]));
-            }
-            if (csvSplit[3] == 1002) {
-                latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                setDotMarkerPosition(latLng, Number(csvSplit[8]));
-            }
-            if (csvSplit[3] == 1003) {
-                //set angle error for fmin
-                promiseErrors.push(csvSplit[5]);
-            }
-            if (csvSplit[3] == 1004) {
-                latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                setBeaconMarkerPosition(latLng, accessPointId(csvSplit[8]));
-            }
-            if (csvSplit[3] == 1008) {
-                latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                heading = Number(csvSplit[10]);
-                if (id != 'transport-') {
-                    addToPolyline(id + "fused-mag", "green", latLng);
-                }
-
-                if (id = "transport-") {
-                    //move the same location marker for dotError in transport
-                    id = "js-";
-                }
-                setLocationMarkerPosition(id + "fused-mag", "green", latLng);
-                setLocationMarkerHeading(id + "fused-mag", heading);
-
-            }
-            if (csvSplit[3] == 1009) {
-                latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                heading = Number(csvSplit[10]);
-                if (id != 'transport-') {
-                    addToPolyline(id + "fused-gyro", "blue", latLng);
-                }
-                if (id = "transport-") {
-                    //move the same location marker for dotError in transport
-                    id = "js-";
-                }
-                setLocationMarkerPosition(id + "fused-gyro", "blue", latLng);
-                setLocationMarkerHeading(id + "fused-gyro", heading);
-
-            }
-            // if (csvSplit[3] == 1011) {
-            //     latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-            //     heading = Number(csvSplit[10]);
-            //     if (id != 'transport-') {
-            //         addToPolyline(id + "fused-vdr", "green", latLng);
-            //     }
-            //     if (id = "transport-") {
-            //         //move the same location marker for dotError in transport
-            //         id = "js-";
-            //     }
-            //     setLocationMarkerPosition(id + "fused-vdr", "green", latLng);
-            //     setLocationMarkerHeading(id + "fused-vdr", heading);
-
-            // }
-
-            if (id != 'transport-') {
-                //appending lines only for initial run-through
-                if (csvSplit[3] == 201) {//pdr steps are differential
-
-                }
-                if (csvSplit[3] == 1005) {
-                    latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                    addToPolyline("building", "black", latLng);
-                }
-                if (csvSplit[3] == 65666) {
-                    latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                    addToPolyline("gps", "red", latLng);
-                }
-
-                if (csvSplit[3] == 65668) {
-                    latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                    addToPolyline("applanix", "purple", latLng);
-                }
-                if (csvSplit[3] == 302) {
-                    latLng = new google.maps.LatLng(Number(csvSplit[5]), Number(csvSplit[6]));
-                    addToPolyline(id + "fused-realtime", "green", latLng);
-                }
-            }
-            if (csvSplit[3] == 302) {
-                var latLngs = [];
-                for (i = 0; i < (csvSplit.length - 6) / 2; i++) {
-                    var lat = Number(csvSplit[5 + 2 * i]);
-                    var lng = Number(csvSplit[6 + 2 * i]);
-                    if (!((lat == 0) || (lng == 0) || (isNaN(lat) || (isNaN(lng))))) {
-                        latLngs.push({
-                            "lat": lat,
-                            "lng": lng
-                        });
-                    } else {//console.log(lat + "," + lng);
-                    }
-                }
-                if (id = "transport-") {
-                    //move the same location marker for dotError in transport
-                    id = "js-";
-                }
-                setPolyline(id + "fused", "blue", latLngs);
-                setLocationMarkerPosition(id + "fused", "#0A0", latLngs[0]);
-                if (Date.now() - lastHeadingUpdateTime > 500) {
-                    lastHeadingUpdateTime = Date.now();
-                    if (latLngs.length > 1) {
-                        var heading = google.maps.geometry.spherical.computeHeading(new google.maps.LatLng(latLngs[1].lat, latLngs[1].lng), new google.maps.LatLng(latLngs[0].lat, latLngs[0].lng));
-                        setLocationMarkerHeading(id + "fused", heading);
-                    }
-                }
-            }
+          
             if (csvSplit[3] == 2000) {
                 var sceneId = 'bluecoin';
                 if (!scenes.hasOwnProperty(sceneId)) {
@@ -864,196 +587,7 @@ function renderAlgorithmEvent(id, csv) {
         }
     }
 }
-function clearPolylines() {
-    for (var key in polylines) {
-        if (polylines.hasOwnProperty(key)) {
-            polylines[key].setMap(null);
-            delete polylines[key];
-        }
-    }
-}
-function setLocationMarkerHeading(id, heading) {
-    if (locationMarkers.hasOwnProperty(id)) {
-        locationMarkers[id].headingCone.icon.rotation = heading;
-        locationMarkers[id].headingCone.setOptions({
-            icon: locationMarkers[id].headingCone.icon
-        });
-    }
-}
-function setLocationMarkerPosition(id, color, center) {
-    //console.log('setting ' + id + ' ' + color + ' locationMarker');
-    if (!locationMarkers.hasOwnProperty(id)) {
-        locationMarkers[id] = {
-            headingCone: new google.maps.Marker({
-                position: center,
-                map: map,
-                icon: {
-                    path: 'M -10 0 L -30 -40 q 30 -10 60 0 L 10 0 z',
-                    strokeColor: color,
-                    strokeWeight: 0,
-                    fillColor: color,
-                    fillOpacity: 0.2,
-                    flat: true,
-                    rotation: 0
-                },
-                clickable: false,
-            }),
-            centerCircle: new google.maps.Marker({
-                map: map,
-                clickable: false,
-                icon: {
-                    path: google.maps.SymbolPath.CIRCLE,
-                    fillOpacity: 1,
-                    fillColor: color,
-                    strokeOpacity: 1.0,
-                    strokeColor: 'white',
-                    strokeWeight: 3.0,
-                    scale: 12 //pixels                    
-                }
-            })
-        }
-    }
-    locationMarkers[id].centerCircle.setPosition(center);
-    locationMarkers[id].headingCone.setPosition(center);
-}
 
-function setPolyline(id, color, latLngs) {
-    // console.log('setting ' + color + ' line');
-    if (polylines.hasOwnProperty(id)) {
-        polylines[id].setPath(latLngs);
-    } else {
-        polylines[id] = new google.maps.Polyline({
-            path: latLngs,
-            clickable: false,
-            strokeColor: color,
-            strokeOpacity: 0.5,
-            strokeWeight: 5,
-            map: map
-        });
-    }
-}
-function addToPolyline(id, color, latLng) {
-    if (!polylines.hasOwnProperty(id)) {
-        console.log('new polyline: ' + id);
-        polylines[id] = new google.maps.Polyline({
-            clickable: false,
-            strokeColor: color,
-            strokeOpacity: 0.5,
-            strokeWeight: 5,
-            map: map
-        });
-    }
-    var path = polylines[id].getPath();
-    path.push(latLng);
-    if (path.length > 50000) {
-        path.removeAt(0);
-    }
-}
-
-var PdrPath = function () {
-    this.pdrEvents = [];
-    this.latLngs = [];
-    this.metaPdrLatLngs = [];
-
-    this.addStep = function (event) {
-        this.pdrEvents.push(event);
-    }
-
-    this.computeLatLngs = function () {
-        this.latLngs = [];
-        var metaIndex = 0;
-        var headingOffset = 0.;
-        var scaleFactor = 1.;
-        var currentLatLng;
-        var inputIndex = 0
-        while (inputIndex < this.pdrEvents.length) {
-            var event = this.pdrEvents[inputIndex];
-
-            //interleave meta data
-            if ((metaIndex < metaData.events.length) && (metaData.events[metaIndex].timestamp < event.timestamp)) {
-                var metaEvent = metaData.events[metaIndex];
-
-                if (metaIndex > 0) {
-                    //use step before
-                    this.metaPdrLatLngs[metaIndex] = currentLatLng;
-                }
-                if (metaEvent.id == 301) {
-                    headingOffset = metaEvent.values[3];
-                    scaleFactor = metaEvent.values[6];
-                    currentLatLng = new google.maps.LatLng(metaEvent.values[0], metaEvent.values[1]);
-                }
-                if (metaIndex == 0) {
-                    //the first latlng in the metaData
-                    this.metaPdrLatLngs[metaIndex] = currentLatLng;
-                }
-                metaIndex++;
-            } else {
-                inputIndex++;
-            }
-            if (currentLatLng != null) {
-                var nextLatLng = new google.maps.geometry.spherical.computeOffset(currentLatLng, scaleFactor * event.values[2], -headingOffset + (180 / Math.PI) * event.values[0]);
-                currentLatLng = nextLatLng;
-                this.latLngs.push(currentLatLng);
-            }
-        }
-    }
-
-    this.draw = function () {
-        setPolyline('qoffset', 'magenta', this.latLngs)
-    }
-
-    this.autoRotate = function (index, enableRotate, enableScale) {
-        this.computeLatLngs();
-        var targetStartEvent = metaData.events[Number(index)];
-        var targetEndEvent = metaData.events[Number(index) + 1];
-        var enableRotate = enableRotate || true;
-        var enableScale = enableScale || true;
-
-        if ((targetStartEvent == null) || (targetEndEvent == null) || (targetStartEvent.id != 301)) {
-            //not a param point fusion or suitable neighbor point
-            return 0;
-        }
-        var targetStartLocation = new google.maps.LatLng(targetStartEvent.values[0], targetStartEvent.values[1]);
-        var targetEndLocation = new google.maps.LatLng(targetEndEvent.values[0], targetEndEvent.values[1]);
-
-        setPolyline('target', 'blue', [targetStartLocation, targetEndLocation]);
-
-        var targetDistance = google.maps.geometry.spherical.computeDistanceBetween(targetStartLocation, targetEndLocation);
-        var targetHeading = google.maps.geometry.spherical.computeHeading(targetStartLocation, targetEndLocation);
-        console.log(targetDistance);
-        console.log(targetHeading);
-
-        //find latlng of pdr in outputEvents after start metaEvent
-        var pdrStartLocation = targetStartLocation;
-
-        //find latlng of pdr in outputEvents before next metaEvent
-        var pdrEndLocation = this.metaPdrLatLngs[index + 1];
-
-        setPolyline('pdr', 'green', [pdrStartLocation, pdrEndLocation]);
-
-        var pdrDistance = google.maps.geometry.spherical.computeDistanceBetween(pdrStartLocation, pdrEndLocation);
-        var pdrHeading = google.maps.geometry.spherical.computeHeading(pdrStartLocation, pdrEndLocation);
-        console.log(pdrDistance);
-        console.log(pdrHeading);
-
-        if (enableRotate) {
-            targetStartEvent.values[3] = wrapTo180(targetStartEvent.values[3] + pdrHeading - targetHeading);
-        }
-        if (enableScale) {
-            targetStartEvent.values[6] = (targetStartEvent.values[6] * targetDistance) / pdrDistance;
-        }
-        // metaData.updateWorker();
-    }
-}
-
-function wrapTo180(angle) {
-    var newAngle = angle;
-    while (newAngle <= -180)
-        newAngle += 360;
-    while (newAngle > 180)
-        newAngle -= 360;
-    return newAngle;
-}
 
 //gui
 var guiControls = {};
@@ -1091,15 +625,15 @@ function loadAlgorithm() {
 
 function yieldingLoop(startIndex, stopIndex, chunksize, callback, finished) {
     var i = startIndex;
-    (function chunk() {
+    (async function chunk() {
         var end = Math.min(i + chunksize, stopIndex);
-        for (; i < end; ++i) {
-            callback.call(null, i);
+        for (; i < end; i++) {
+            await callback(i);
         }
         if (i < stopIndex) {
             setTimeout(chunk, 0);
         } else {
-            finished.call(null);
+            finished();
         }
     }
     )();
@@ -1313,12 +847,18 @@ async function recordBluetooth() {
 
 }
 
+var isRunning = 0;
+
 async function run(options) {
+    if(isRunning != 0){
+        console.log('attempting to run while run in progress');
+    }else{    
     return new Promise(async (resolve, reject) => {
         var tic = Date.now();
         outputEvents = [];
 
-        console.log('starting run ')
+        console.log('starting run ');
+        isRunning++;
         //         if(options != null){
         //             console.log(Object.keys(options));
         //         }     
@@ -1372,39 +912,25 @@ async function run(options) {
                     await delay(event.timestamp - previousTimestamp);
                     previousTimestamp = event.timestamp;
                 }
-
-                if ([11, 65666, 65668].includes(event.id)) {
-                    onOutputEvent(event);
-                }
-
-                //use 65668 as initial truth for firefly log
-                if (event.id == 65668) {
-                    //  if((initialTruth == null)||parameters.realTimePlots == false){
-                    initialTruth = JSON.parse(JSON.stringify(event));
-                    initialTruth.id = 1002;
-                    event = initialTruth;
-                    //  }
-                }
-
-                //event preprocess function for runtime filter of input events
-                if (options.modifyEvent) {
-                    event = options.modifyEvent(event);
-                }
+                
                 if (event != null) {
                     algorithmUpdate(event);
                 }
             }, async function () {
                 updatePlots();
                 console.log('run complete (' + ((Date.now() - tic) * 1e-3).toFixed(3) + 's)');
+                isRunning--;
                 tic = Date.now();
 
                 if (parameters.isPlaying) {
+                    await delay(10);
                     parameters.runCurrentFile();
                 }
                 resolve();
             });
     }
     );
+    }
 }
 
 ; var Parameters = function () {

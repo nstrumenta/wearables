@@ -19,7 +19,7 @@
             { "id": "imu_data.gyro_scale.x", "name": "gyro scale x", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.y", "name": "gyro scale y", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
             { "id": "imu_data.gyro_scale.z", "name": "gyro scale z", "value": 1, "min": -2, "max": 2, "step": 1e-5 },
-            { "id": "imu_data.madgwick_gain", "name": "accel gain", "value": 0.12, "min": 0, "max": 1, "step": 1e-4 },
-            { "id": "imu_data.angularrate_mag", "name": "mag gain", "value": -0.001, "min": -1, "max": 1, "step": 1e-5 }
+            { "id": "imu_data.madgwick_gain", "name": "accel gain", "value": 0.022, "min": 0, "max": 1, "step": 1e-4 },
+            { "id": "imu_data.angularrate_mag", "name": "mag gain", "value": 0.022, "min": -1, "max": 1, "step": 1e-5 }
         ]
 }
