@@ -31,7 +31,7 @@ void imu_init(imu_data_t *imu_data)
 
 void imu_update_accelerometer(imu_data_t *imu_data, nst_event_t event, nst_event_t *output_events, int *output_events_count)
 {
-    imu_data->acc_sample = v3_mul(imu_data->acc_scale,v3_sub(vec3(event.values[0], event.values[1], event.values[2]),imu_data->acc_offset));
+    imu_data->acc_sample = v3_muls(v3_mul(imu_data->acc_scale,v3_sub(vec3(event.values[0], event.values[1], event.values[2]),imu_data->acc_offset)), 0.0522);
 }
 
 void imu_update_magnetic_field(imu_data_t *imu_data, nst_event_t event, nst_event_t *output_events, int *output_events_count)
