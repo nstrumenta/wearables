@@ -51,13 +51,13 @@ void imu_update_gyro(imu_data_t *imu_data, nst_event_t event, nst_event_t *outpu
     imu_data->pose_imu.timestamp = event.timestamp;
 
     MadgwickAHRSupdate(imu_data->gyro_sample.x,
-                       imu_data->gyro_sample.y,
-                       imu_data->gyro_sample.z,
+                       -imu_data->gyro_sample.y,
+                       -imu_data->gyro_sample.z,
                        imu_data->acc_sample.x,
                        imu_data->acc_sample.y,
-                       imu_data->acc_sample.z,
-                       imu_data->mag_sample.x,
-                       imu_data->mag_sample.y,
+                       -imu_data->acc_sample.z,
+                       -imu_data->mag_sample.x,
+                       -imu_data->mag_sample.y,
                        imu_data->mag_sample.z,
                        delta_time,
                        imu_data->madgwick_gain,
