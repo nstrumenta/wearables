@@ -815,9 +815,9 @@ async function recordBluetooth() {
         .then(characteristic => characteristic.startNotifications())
         .then(characteristic => {
             // Set up event listener for when characteristic value changes.
+            parameters.clearEventData();
             characteristic.addEventListener('characteristicvaluechanged',
-                handleRawSensorNotification);
-            // Reading Battery Level...
+                handleRawSensorNotification);                
             return characteristic.readValue();
         })
         .catch(error => { console.log(error); });
