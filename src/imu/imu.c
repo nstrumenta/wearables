@@ -2,7 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "../Madgwick/MadgwickAHRS.h"
+#include "MadgwickAHRS.h"
 
 //#define DEBUG_EVENTS
 
