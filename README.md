@@ -1,33 +1,23 @@
 # Bluecoin algorithm development
 
+![Bluecoin with Data](/screenshots/Stop_Recording_BLE.png?raw=true "Bluecoin with Data")
+
 ******* NOTE *******
 If the screenshots do not render properly, please goto the following URL:  https://github.com/nstrumenta/wearables
 
-Go to https://editor.nstrumenta.com in order to access the Nstrumenta Algorithm development and Sandbox platform.  You will see the following Sign In dialog box:
+Go to https://editor.nstrumenta.com in order to access the Nstrumenta Algorithm development and Sandbox platform.
 
-![Sign In Dialog](/screenshots/Sign_In_Dialog.png?raw=true "Sign In Dialog")
+After successfully logging in with your email and password.  Please click on “Open” button at top.
 
-After successfully logging in with your email and password, you will see this screen.  Please click on “Open” button at top.
-
-![Editor No Project](/screenshots/Editor_No_Project.png?raw=true "Editor No Project")
-
-You will see the Open Project dialog box.  Please click on the “Bluecoin” button and then click “Open” button on the lower left corner of the dialog box.
-
-![Open Project Dialog](/screenshots/Open_Project_Dialog.png?raw=true "Open Project Dialog")
+Open the "nstrumenta/wearables" project in the Open Project dialog and then click “Open” button on the lower left corner of the dialog box.
 
 You may browse the C source code by clicking the files in the left hand pane to see them open in the editor.
 
-Build:  In order to launch the Bluecoin sandbox to run the Bluecoin unit, please push the “Build” button in the following window:
+Build:  In order to launch the wearables sandbox push the “Build” button.
 
-![Build Button Launch](/screenshots/Build_Button_Launch.png?raw=true "Build Button Launch")
+In order to launch the sandbox, push the "Run" button next to the "Build" button.
 
-In order to launch the Bluecoin Sandbox, please push the "Run" button next to the "Build" button.
-
-![Run Button Launch](/screenshots/Run_Button_Launch.png?raw=true "Run Button Launch")
-
-A new browser tab will be launched where the Bluecoin Sandbox will load:
-
-![Bluecoin Sandbox](/screenshots/Bluecoin_Sandbox.png?raw=true "Bluecoin Sandbox")
+A new browser tab will be launched where the sandbox will load.
 
 Click ‘Record Bluetooth’ and locate the Bluecoin (NSTR102) in the list inside the Bluetooth dialog box.  Push the pair button.
 
